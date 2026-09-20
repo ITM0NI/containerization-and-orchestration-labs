@@ -212,7 +212,7 @@ NSpid:  3352039  1
 обычный каталог с сохранёнными на диске данными. Благодаря новому mount команда
 `ps` внутри показала только `api` с PID 1, shell и саму команду `ps`.
 
-Для входа использовался `nsenter`. Первая попытка завершилась ошибкой
+Для входа использовался `nsenter`. Первая попытка, конечно, завершилась ошибкой
 `setgroups failed`, потому что непривилегированное отображение GID установило
 `setgroups=deny`. Параметр `--preserve-credentials` запретил `nsenter` повторно
 менять группы и позволил войти с уже настроенным отображением UID/GID:
@@ -230,7 +230,7 @@ nsenter \
 ### UTS и user namespaces
 
 После создания UTS namespace процессу было присвоено имя хоста `lab1-api`.
-Настоящий hostname ноутбука остался `enigma-Aspire-A715-75G`.
+Настоящий hostname ноута остался `enigma-Aspire-A715-75G`.
 
 User namespace отобразил UID 0 внутри на UID 1000 снаружи:
 
@@ -300,3 +300,150 @@ Namespaces изменили представление процесса о си�
 ядро. Хост по-прежнему видел тот же процесс, тогда как изнутри он был PID 1,
 root с отдельным hostname, IPC-реестром и сетевым стеком. Ограничений потребления
 ресурсов namespaces не добавили — это задача cgroups.
+
+## Часть 3 — cgroup v2
+
+Namespaces ограничивают видимость, но не потребление ресурсов. Для проверки
+контроллеров cgroup v2 сервис запускался напрямую: каждый эксперимент изолировал
+один механизм, а объединение с namespaces выполняется далее в общем скрипте.
+
+### Ограничение памяти и OOM
+
+Для API была создана cgroup с пределом 64 МиБ, запрещённым swap и групповым OOM:
+
+```bash
+sudo mkdir /sys/fs/cgroup/lab1-memory
+echo $((64 * 1024 * 1024)) | sudo tee /sys/fs/cgroup/lab1-memory/memory.max
+echo 0 | sudo tee /sys/fs/cgroup/lab1-memory/memory.swap.max
+echo 1 | sudo tee /sys/fs/cgroup/lab1-memory/memory.oom.group
+
+pid=$(pgrep -n -x lab1-api)
+echo "$pid" | sudo tee /sys/fs/cgroup/lab1-memory/cgroup.procs
+```
+
+Перед нагрузкой проверялось, что текущий PID действительно находится в
+`/lab1-memory`, а счётчики `memory.events` равны нулю. Запрос на выделение и
+удержание 80 МиБ превысил лимит:
+
+```bash
+curl --max-time 10 --show-error 'http://127.0.0.1:8080/eat?mb=80'
+```
+
+Соединение завершилось без ответа, а процесс получил `SIGKILL`:
+
+![API завершён memory cgroup OOM killer](docs/screenshots/part-03-memory-killed.png)
+
+Счётчики после запроса показали `oom=1`, ненулевой `oom_kill` и
+`oom_group_kill=1`; `cgroup.procs` опустел. Значение `max=37` означает количество
+неудачных начислений памяти сверх `memory.max`, а не число HTTP-запросов.
+
+![Настройка memory cgroup и OOM-счётчики](docs/screenshots/part-03-memory-oom.png)
+
+При первой проверке после OOM API был запущен повторно (тк не сделал скрин), но новый PID не был
+перемещен в `lab1-memory`. Поэтому несколько запросов успешно выделили память.
+Это показало, что cgroup связывается с экземпляром процесса, а не с именем
+бинарника: новый процесс наследует cgroup своего родителя либо должен быть явно
+перемещен. Эксперимент был повторен с проверкой `cgroup.procs` и
+`/proc/<pid>/cgroup`.
+
+`memory.events` является набором счетчиков memory controller.
+Ошибка `curl` доказывает только потерю соединения, а увеличение `oom_kill`
+однозначно связывает завершение с OOM внутри этой cgroup. (кстати сам контроллер процесс
+не перезапускает, но в Kubernetes завершение обычно обнаруживает kubelet/runtime и применяет
+restart policy).
+
+### CPU throttling
+
+Для CPU была задана квота 50 000 мкс на период 100 000 мкс:
+
+```bash
+sudo mkdir /sys/fs/cgroup/lab1-cpu
+echo '50000 100000' | sudo tee /sys/fs/cgroup/lab1-cpu/cpu.max
+pid=$(pgrep -n -x lab1-api)
+echo "$pid" | sudo tee /sys/fs/cgroup/lab1-cpu/cgroup.procs
+```
+
+Это соответствует половине одного CPU. До нагрузки счетчики throttling были
+нулевыми:
+
+![CPU-квота и исходный cpu.stat](docs/screenshots/part-03-cpu-before.png)
+
+Нагрузка запускалась по ручке `/burn`:
+
+```bash
+curl http://127.0.0.1:8080/burn
+```
+
+Процесс продолжил работать, но после исчерпания 50 мс квоты в очередном периоде
+ядро откладывало его выполнение до следующего периода. В `cpu.stat` выросли
+`nr_throttled` и `throttled_usec`:
+
+![CPU throttling под нагрузкой](docs/screenshots/part-03-cpu-throttling.png)
+
+Повторная проверка показала дальнейший рост счетчиков: `nr_periods` изменился с
+221 до 825, а `nr_throttled` — с 217 до 821. Практически каждый период cgroup
+упиралась в квоту.
+
+![Рост счётчиков CPU throttling](docs/screenshots/part-03-cpu-growth.png)
+
+Показание `%CPU` обычной команды `ps` было ниже 50%, потому что это среднее за всё
+время жизни процесса, включая простой до запуска `/burn`. Фактическое срабатывание
+лимита подтверждают счётчики контроллера, а не единичное показание `ps`.
+
+### Ограничение числа процессов
+
+Для безопасной проверки fork-нагрузки была создана отдельная cgroup с пределом
+20 задач:
+
+```bash
+sudo mkdir /sys/fs/cgroup/lab1-pids
+echo 20 | sudo tee /sys/fs/cgroup/lab1-pids/pids.max
+```
+
+В cgroup был перемещён дочерний shell. Все запущенные им процессы автоматически
+наследовали ту же cgroup и её лимит:
+
+```bash
+# Терминал 1
+bash
+echo $$
+```
+
+```bash
+# Терминал 2
+shell_pid=<PID_ИЗ_ПЕРВОГО_ТЕРМИНАЛА>
+echo "$shell_pid" | sudo tee /sys/fs/cgroup/lab1-pids/cgroup.procs
+```
+
+![Настройка pids cgroup и дочерний shell](docs/screenshots/part-03-pids-before.png)
+
+Из дочернего shell была запущена нагрузка:
+
+```bash
+stress-ng --fork 100 --timeout 10s --metrics-brief
+```
+
+`stress-ng` попытался запустить 100 workers, но cgroup заполнилась ровно до
+`pids.current=20`. Счётчик `max` в `pids.events` вырос до сотен тысяч: каждая
+такая запись означает отклонённый ядром `fork/clone`.
+
+![Достижение pids.max и отказы fork](docs/screenshots/part-03-pids-limit.png)
+
+Нагрузка остановлена через `Ctrl+C`. Существующие процессы не были убиты, а после
+их завершения `pids.current` вернулся к одному; накопленный счётчик отказов
+сохранился.
+
+![Завершение stress-ng](docs/screenshots/part-03-pids-stress.png)
+
+![Состояние pids controller после нагрузки](docs/screenshots/part-03-pids-after.png)
+
+### Вывод
+
+| Ресурс | Настройка | Поведение при достижении предела | Доказательство |
+| --- | --- | --- | --- |
+| Память | `memory.max` | OOM и принудительное завершение | `memory.events:oom_kill` |
+| CPU | `cpu.max` | Приостановка до следующего периода | `cpu.stat:nr_throttled` |
+| Процессы | `pids.max` | Отказ нового `fork/clone` | `pids.events:max` |
+
+Cgroups ограничили то, что namespaces принципиально не контролируют: объем
+памяти, процессорное время и число создаваемых задач.

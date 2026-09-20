@@ -447,3 +447,135 @@ stress-ng --fork 100 --timeout 10s --metrics-brief
 
 Cgroups ограничили то, что namespaces принципиально не контролируют: объем
 памяти, процессорное время и число создаваемых задач.
+
+## Часть 4 — права процесса
+
+Namespaces и cgroups сами по себе не отвечают на вопрос, какие операции процессу
+разрешено просить у ядра. Для ограничения прав были отдельно проверены два
+механизма: capabilities и seccomp.
+
+### Linux capabilities
+
+Сначала был создан user namespace вместе с отдельным UTS namespace:
+
+```bash
+unshare --user --map-root-user --uts bash
+```
+
+Внутри процесса `id` показывал `uid=0(root)`, а в effective-наборе присутствовали
+capabilities. В частности, `CAP_SYS_ADMIN` позволила изменить hostname внутри
+UTS namespace:
+
+```bash
+hostname capability-demo
+```
+
+![Root с capabilities меняет hostname](docs/screenshots/part-04-capabilities-before.png)
+
+Затем наборы capabilities были очищены перед запуском нового shell:
+
+```bash
+setpriv \
+  --bounding-set=-all \
+  --inh-caps=-all \
+  --ambient-caps=-all \
+  --no-new-privs \
+  sh -c '
+    id
+    capsh --print | grep -E "^(Current|Bounding set)"
+    hostname should-not-work
+  '
+```
+
+`id` по-прежнему показывал UID 0, однако `Current` и `Bounding set` оказались
+пустыми, а смена hostname завершилась отказом. Повторная проверка показала, что
+имя осталось `capability-demo`.
+
+![UID 0 без capabilities не меняет hostname](docs/screenshots/part-04-capabilities-after.png)
+
+Таким образом, UID 0 описывает идентичность процесса, но сам по себе не гарантирует
+право на привилегированную операцию. Ядро дополнительно проверяет соответствующую
+capability в effective-наборе. Bounding set ограничивает capabilities, которые
+можно получить при последующем `exec`, а `no_new_privs` запрещает этому `exec`
+повышать привилегии через setuid-бинарник или file capabilities.
+
+Тестовому API не нужны привилегированные операции: он слушает непривилегированный
+порт 8080, выделяет память и создаёт CPU-нагрузку. Поэтому для него допустим
+пустой набор capabilities.
+
+### Seccomp
+
+Capabilities ограничивают привилегированные действия, но не задают общий список
+доступных системных вызовов. Для проверки seccomp создан
+[`seccomp-profile.json`](seccomp-profile.json):
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": ["unshare", "setns"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}
+```
+
+Это демонстрационный denylist, а не production allowlist: остальные syscalls
+разрешены, а попытки вызвать `unshare(2)` или `setns(2)` отклоняются с
+`errno=1` (`EPERM`).
+
+JSON-файл сам не может загрузить фильтр в ядро. Установленный в системе `setpriv`
+не поддерживает seccomp-фильтры, поэтому для воспроизводимого эксперимента написан
+небольшой [`seccomp-launcher.py`](seccomp-launcher.py). Он читает профиль,
+создаёт фильтр через `libseccomp`, загружает его и выполняет целевую команду через
+`exec`.
+
+Без фильтра `unshare` успешно создал user namespace. Запуск той же команды через
+launcher завершился ошибкой `Operation not permitted`:
+
+```bash
+unshare --user --map-root-user true \
+  && echo "unshare without seccomp: allowed"
+
+python3 seccomp-launcher.py \
+  seccomp-profile.json \
+  unshare --user --map-root-user true
+```
+
+![Отказ syscall unshare под seccomp](docs/screenshots/part-04-seccomp-unshare.png)
+
+После этого через тот же launcher был запущен API:
+
+```bash
+python3 seccomp-launcher.py seccomp-profile.json /tmp/lab1-api
+```
+
+Эндпоинт `/health` продолжил отвечать HTTP 200. Состояние процесса в `/proc`
+подтвердило, что фильтр действительно действует уже после `exec`:
+
+```text
+NoNewPrivs:       1
+Seccomp:          2
+Seccomp_filters:  1
+```
+
+![Работающий API с seccomp-фильтром](docs/screenshots/part-04-seccomp-api.png)
+
+`exec` заменил код launcher кодом API, но не создал новый процесс: сохранились PID
+и связанное с процессом seccomp-состояние. Поэтому API унаследовал фильтр и не
+может ослабить его. Значение `Seccomp: 2` означает filter mode, а
+`NoNewPrivs: 1` запрещает получить новые привилегии через последующие `exec`.
+
+### Вывод
+
+Capabilities и seccomp решают разные задачи и дополняют друг друга:
+
+| Механизм | Что ограничивает | Результат эксперимента |
+| --- | --- | --- |
+| Capabilities | Отдельные классы привилегированных операций | UID 0 без нужной capability не смог изменить hostname |
+| Seccomp | Вход в конкретные syscalls | `unshare(2)` получил `EPERM`, при этом API продолжил работать |
+
+Даже наличие `CAP_SYS_ADMIN` не позволило бы обойти запрещённый seccomp syscall:
+фильтр проверяется при входе в системный вызов независимо от UID и capabilities.

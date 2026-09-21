@@ -448,6 +448,8 @@ stress-ng --fork 100 --timeout 10s --metrics-brief
 Cgroups ограничили то, что namespaces принципиально не контролируют: объем
 памяти, процессорное время и число создаваемых задач.
 
+![Ментальная модель Docker до и после первой лекции](docs/images/docker-before-after.png)
+
 ## Часть 4 — права процесса
 
 Namespaces и cgroups сами по себе не отвечают на вопрос, какие операции процессу
@@ -579,3 +581,142 @@ Capabilities и seccomp решают разные задачи и дополня
 
 Даже наличие `CAP_SYS_ADMIN` не позволило бы обойти запрещённый seccomp syscall:
 фильтр проверяется при входе в системный вызов независимо от UID и capabilities.
+
+## Часть 5 — свой Docker
+
+Команды из предыдущих частей были собраны в единый
+[`mydocker.sh`](mydocker.sh). Это еще не production runtime (да и Docker после
+этой лабы спит спокойно), но скрипт одной командой запускает API с изоляцией,
+лимитами и урезанными правами.
+
+### Сборка mini-runtime
+
+Скрипт создаёт одну cgroup `lab1-mydocker`, в которой одновременно включены все
+проверенные ограничения:
+
+| Контроллер | Значение |
+| --- | --- |
+| `memory.max` | 64 МиБ (`67108864`) |
+| `memory.swap.max` | `0` |
+| `memory.oom.group` | `1` |
+| `cpu.max` | `50000 100000` (половина CPU) |
+| `pids.max` | `20` |
+
+Затем `unshare` создаёт user, PID, mount, UTS, IPC и network namespaces. Между
+созданием процесса и запуском API установлен синхронизационный барьер на FIFO:
+
+```text
+unshare создаёт bash → bash блокируется на read из FIFO
+                    → host находит PID bash
+                    → host записывает PID в cgroup.procs
+                    → host пишет start в FIFO
+                    → bash продолжает запуск
+```
+
+Барьер устраняет гонку: API не успеет выделить память или создать процессы до
+попадания под лимиты. `read` является встроенной командой Bash, поэтому во время
+ожидания не появляется дополнительный дочерний процесс вне cgroup.
+
+После открытия барьера процесс устанавливает hostname `lab1-api` и включает
+внутренний loopback. Эти операции выполняются до сброса capabilities, пока у root
+в user namespace ещё есть необходимые полномочия. Затем цепочка `exec` выглядит
+так:
+
+```text
+bash PID 1
+  → setpriv без capabilities и с no_new_privs
+  → seccomp-launcher.py
+  → lab1-api PID 1
+```
+
+`exec` не создаёт новый процесс, поэтому API сохраняет PID 1, namespaces и
+принадлежность к cgroup. При `Ctrl+C` trap останавливает `unshare`, завершает
+оставшиеся процессы через `cgroup.kill`, удаляет cgroup и временный FIFO.
+
+![Запуск API через mydocker.sh](docs/screenshots/part-05-mydocker-start.png)
+
+Снаружи API имел обычный host PID, а `NSpid` показывал тот же процесс как PID 1
+внутри. Путь `/proc/<pid>/cgroup` подтвердил членство в `/lab1-mydocker`.
+Хостовый loopback сервис не видел, но запрос через `nsenter` в network namespace
+вернул HTTP 200:
+
+![PID, cgroup и отдельная сеть mydocker.sh](docs/screenshots/part-05-mydocker-isolation.png)
+
+Итоговый процесс получил пустые capability-наборы, `NoNewPrivs: 1` и
+`Seccomp: 2`. При этом hostname и `/health` продолжили работать:
+
+![Права и работа API в mydocker.sh](docs/screenshots/part-05-mydocker-security.png)
+
+### Запуск через Docker
+
+Чтобы на этом этапе не забегать к Dockerfile из части 6, уже собранный бинарник
+был смонтирован read-only в имевшийся локально образ `ubuntu:22.04`. Требуемая
+бинарником версия glibc не превышала `GLIBC_2.34` и была совместима с образом.
+
+Docker-контейнер запущен с теми же лимитами и моделью прав:
+
+```bash
+sudo docker run \
+  --rm \
+  --name lab1-docker \
+  --hostname lab1-api \
+  --memory 64m \
+  --memory-swap 64m \
+  --cpus 0.5 \
+  --pids-limit 20 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges=true \
+  --security-opt "seccomp=$PWD/seccomp-profile.json" \
+  --publish 127.0.0.1:8080:8080 \
+  --mount type=bind,src=/tmp/lab1-api,dst=/lab1-api,readonly \
+  ubuntu:22.04 \
+  /lab1-api
+```
+
+Значение `--memory-swap` равно `--memory`, поэтому дополнительный swap контейнеру
+не предоставляется. Пользовательский seccomp-профиль заменил встроенный профиль
+Docker специально для сравнения с `mydocker.sh`.
+
+![Запуск того же API через Docker](docs/screenshots/part-05-docker-run.png)
+
+Публикация `127.0.0.1:8080:8080` сделала сервис доступным с хоста, несмотря на
+отдельный network namespace. API получил PID 1 внутри и PID `616095` снаружи.
+Docker с cgroup driver `systemd` поместил контейнер в отдельный scope:
+
+```text
+/system.slice/docker-<container-id>.scope
+```
+
+Чтение файлов cgroup v2 подтвердило, что высокоуровневые флаги Docker превратились
+в те же настройки ядра:
+
+```text
+memory.max:      67108864
+memory.swap.max: 0
+cpu.max:         50000 100000
+pids.max:        20
+```
+
+Изнутри контейнера были также подтверждены hostname, PID 1, нулевые `CapEff` и
+`CapBnd`, `NoNewPrivs: 1` и seccomp filter mode.
+
+![PID, cgroup, лимиты и права Docker-контейнера](docs/screenshots/part-05-docker-verification.png)
+
+### Сравнение
+
+| Область | `mydocker.sh` | Docker |
+| --- | --- | --- |
+| Namespaces | Создаются напрямую через `unshare` | Настраиваются OCI runtime `runc` |
+| Cgroups | Фиксированная cgroup создаётся и удаляется скриптом | `dockerd` управляет systemd scope и метаданными контейнера |
+| Ресурсы | Прямая запись в файлы cgroup v2 | Флаги CLI преобразуются в те же файлы cgroup v2 |
+| Права | `setpriv` и отдельный Python launcher | OCI-конфигурация для capabilities, `no_new_privs` и seccomp |
+| Сеть | Только отдельный `lo`, связи с хостом нет | `veth`, bridge и правила публикации портов |
+| Файловая система | Новая mount table и `/proc`, но корень хоста остаётся видимым | Отдельный rootfs из слоёв образа и управляемые mounts |
+| Дополнительная защита | AppArmor и cgroup namespace не настроены | Доступны AppArmor (`docker-default`) и отдельный cgroup namespace |
+| Жизненный цикл | Shell, поиск дочернего PID и cleanup через trap | Daemon, имена, inspect, logs, автоматическое удаление через `--rm` |
+| PID 1 | API является PID 1 | API также PID 1; init появится только с `--init` |
+
+Совпадение низкоуровневых значений показало, что Docker не заменяет namespaces и
+cgroups каким-то отдельным механизмом: он системно собирает их вместе и добавляет
+сеть, rootfs, политики безопасности, метаданные и управление жизненным циклом.
+Оба варианта по-прежнему используют общее ядро хоста.

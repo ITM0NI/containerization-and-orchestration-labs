@@ -1,0 +1,61 @@
+fullnameOverride: monitoring
+
+defaultRules:
+  create: false
+
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+kubelet:
+  serviceMonitor:
+    interval: 15s
+    cAdvisor: true
+    cAdvisorMetricRelabelings: []
+
+grafana:
+  fullnameOverride: monitoring-grafana
+  defaultDashboardsEnabled: false
+  persistence:
+    enabled: true
+    storageClassName: standard
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 24h
+    retentionSize: 3GB
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+
+alertmanager:
+  enabled: true

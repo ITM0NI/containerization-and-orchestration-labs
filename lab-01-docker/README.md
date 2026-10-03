@@ -1,37 +1,38 @@
-# Лабрадорная работа № 1 - свой Docker
+# Лабораторная работа № 1 - свой Docker
 
-Первоисточник: [условие лабораторной работы](https://github.com/KeladKaal/containerization-and-orchestration/blob/main-rus/lecture-1-docker/lab.md)
+[Условие лабораторной работы](https://github.com/KeladKaal/containerization-and-orchestration/blob/main-rus/lecture-1-docker/lab.md).
 
-Если коротко, цель лабы - разобрать привычный `docker run` на детали и руками
-собрать вокруг обычного процесса namespaces, cgroups и ограничения прав
-
-Спойлер: магии внутри Docker не нашлось...
-
-![Никакой магии внутри Docker](docs/images/no-docker-magic.jpg)
-
-...зато нашлось МНОГО деталей ядра Linux
+Цель: запустить HTTP-сервис, последовательно добавить namespaces, cgroups и
+ограничения прав, собрать собственный launcher и сравнить его с Docker.
+Дополнительно проверил образы, хранение данных, gVisor и мониторинг контейнера.
 
 ## Окружение
 
-- ОС: Linux Mint
-- ядро: Linux 7.0.0-28-generic, x86_64
-- cgroups: cgroup v2
-- язык сервиса: Go 1.25.6
+- ОС: Linux Mint, x86_64.
+- Ядро: Linux `7.0.0-28-generic`.
+- Cgroups: v2.
+- Язык сервиса: Go `1.25.6`.
 
-## Часть 0 - завайбленный подопытный HTTP-сервис
+Команды выполнялись в разные моменты, поэтому PID в проверках различаются.
+Вывод терминала сокращен до значимых строк. Исходные
+[скриншоты](docs/screenshots) сохранены отдельно; графики приведены в части 8.
 
-Для эксперимента был собран маленький `api` на Go с тремя эндпоинтами:
+## Часть 0 - HTTP-сервис
 
-- `GET /health` возвращает `ok`
-- `GET /eat?mb=N` выделяет и удерживает `N` МиБ памяти
-- `GET /burn` запускает бесконечный цикл и нагружает одно ядро CPU
+Код: [api/main.go](api/main.go).
 
-С памятью есть важный нюанс: сервис не просто выделяет срез байтов, но и трогает
-каждую страницу (ссылки на блоки остаются в памяти, поэтому сборщик мусора Go не сможет прибрать результаты эксперимента)
+| Endpoint | Поведение |
+| --- | --- |
+| `GET /health` | Возвращает `ok` |
+| `GET /eat?mb=N` | Выделяет и удерживает N МиБ памяти |
+| `GET /burn` | Запускает бесконечный цикл в фоновой goroutine |
 
-## Часть 1 - пока просто процесс
+`/eat` обращается к каждой выделенной странице. Ссылки на блоки сохраняются в
+глобальном срезе, поэтому сборщик мусора не освобождает их после HTTP-запроса.
 
-Начинаем с честного baseline: просто собираю бинарь и запускаю прямо на хосте, никаких контейнеров
+## Часть 1 - запуск без изоляции
+
+Собрал и запустил сервис в отдельном терминале:
 
 ```bash
 cd lab-01-docker/api
@@ -39,144 +40,71 @@ go build -o /tmp/lab1-api .
 /tmp/lab1-api
 ```
 
-![Запуск API напрямую](docs/screenshots/part-01-api-start.png)
+Проверил доступность:
 
-Сначала чекаем здоровбье:
+```console
+$ curl -i http://127.0.0.1:8080/health
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 3
 
-```bash
-curl -i http://127.0.0.1:8080/health
+ok
 ```
 
-![Проверка health endpoint](docs/screenshots/part-01-health.png)
-
-### Процесс с точки зрения хоста
-
-Имя бинаря известно, и по нему можно найти PID нужного процесса:
-
-```bash
-pgrep -a -x lab1-api
-```
-
-`-x` требует точного совпадения имени, а `-a` заодно показывает команду запуска
+PID `185525` сохранил в переменную `pid`. Вывод `ps -f -p "$pid"`:
 
 ```text
-185525 /tmp/lab1-api
+UID        PID    PPID  C STIME TTY      TIME     CMD
+david   185525  131473  0 17:49 pts/4    00:00:00 /tmp/lab1-api
 ```
 
-Чтобы дальше не копировать число руками, здесь и далее сохраняю PID в переменную и сразу чекаю ее:
+### Исходная cgroup
 
-```bash
-pid=$(pgrep -n -x lab1-api)
-echo "$pid"
+Получил путь cgroup и проверил лимит памяти:
+
+```console
+$ cat "/proc/$pid/cgroup"
+0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-d8eddbf4-b660-489d-aa16-8ca2889edf5d.scope
+$ cgroup_path=$(cut -d: -f3 "/proc/$pid/cgroup")
+$ cat "/sys/fs/cgroup${cgroup_path}/memory.max"
+max
 ```
 
-`-n` выбирает самый новый процесс, если одноименных несколько, а `$(...)`
-подставляет результат команды в переменную
+Процесс находится в systemd scope терминала. `memory.max=max` означает, что
+отдельный потолок памяти на этом уровне не задан.
 
-Теперь смотрим на процесс глазами хоста:
+В scope не было `cpu.max`, поэтому проверил родительский `app.slice`:
 
-```bash
-ps -f -p "$pid"
-```
-
-Во время эксперимента это был PID `185525`, пользователь `david` (я), все максимально
-базово, отдельного PID namespace пока нет
-
-Тут я затупил и просто `ps` вызвал, API в выводе не оказалось 😱
-А потому что обычный
-`ps` показывает процессы текущего терминала, а сервис работал во втором.
-А вот `pgrep` ищет по имени и текущим TTY не ограничивается
-
-![Поиск PID и просмотр процесса на хосте](docs/screenshots/part-01-host-process.png)
-
-### Естб ли cgroup?
-
-Да, в cgroup v2 процесс вообще не может быть "нигде", после прямого запуска API
-попал в systemd scope терминала, просто отдельные лимиты для него еще не были заданы
-
-Смотрим текущую cgroup через `/proc`:
-
-```bash
-cat "/proc/$pid/cgroup"
-```
-
-В cgroup v2 строка начинается с `0::`, после второго двоеточия лежит нужный путь.
-Сохраняем его:
-
-```bash
-cgroup_path=$(cut -d: -f3 "/proc/$pid/cgroup")
-echo "$cgroup_path"
-```
-
-Сначала чекаем память:
-
-```bash
-cat "/sys/fs/cgroup${cgroup_path}/memory.max"
-```
-
-Видим `max`, а значит отдельного потолка памяти на этом уровне нет
-
-![Путь cgroup процесса и исходный лимит памяти](docs/screenshots/part-01-process-cgroup-memory.png)
-
-А вот файла `cpu.max` в scope процесса вообще не оказалось, но...
-
-![Путь cgroup процесса и исходный лимит памяти](docs/images/why.jpg)
-
-подозрительно, поэтому иду вверх по иерархии к ближайшему предку с CPU controller:
-
-```bash
-terminal_slice=$(dirname "$cgroup_path")
-app_slice=$(dirname "$terminal_slice")
-echo "$app_slice"
-```
-
-Проверяю, какие контроллеры доступны в `app.slice`, какие из них переданы детям и
-какая квота стоит на самом `app.slice`:
-
-```bash
-cat "/sys/fs/cgroup${app_slice}/cgroup.controllers"
-cat "/sys/fs/cgroup${app_slice}/cgroup.subtree_control"
-cat "/sys/fs/cgroup${app_slice}/cpu.max"
-```
-
-Получен следующий результат:
-
-```text
+```console
+$ terminal_slice=$(dirname "$cgroup_path")
+$ app_slice=$(dirname "$terminal_slice")
+$ cat "/sys/fs/cgroup${app_slice}/cgroup.controllers"
 cpu memory pids
+$ cat "/sys/fs/cgroup${app_slice}/cgroup.subtree_control"
 memory pids
+$ cat "/sys/fs/cgroup${app_slice}/cpu.max"
 max 100000
 ```
 
-Вот и разгадка: CPU controller доступен в `app.slice`, но в
-`cgroup.subtree_control` детям переданы только `memory` и `pids`, поетому в scope
-терминала файла `cpu.max` и нет, контроллер туда просто не делегировали
+CPU controller доступен родителю, но не включен для его дочерних cgroups.
+У `app.slice` CPU quota также не задана; ограничения выше по иерархии возможны.
 
-![Контроллеры и исходная CPU-квота](docs/screenshots/part-01-cgroup-cpu.png)
+Вывод: API работает как обычный процесс хоста, с общей сетью и PID namespace,
+без собственных лимитов ресурсов. Ответ `/health` подтверждает доступность
+сервиса, но не доказывает изоляцию.
 
-`max` у `app.slice` означает отсутствие CPU quota, а `100000` - период учета в
-микросекундах. Ограничения выше по иерархии все еще возможны, но своих лимитов
-CPU и памяти у API сейчас нет
+## Часть 2 - namespaces
 
-### Вывод
-
-Пока это обычный процесс хоста: общие PID namespace и сеть, никаких кастомных лимитов
-ресурсов. `/health` говорит что сервису "сомнительно, но ОКЭЙ", но НИКАКОЙ изоляции пока нет, вернее не доказывает
-
-## Часть 2 - так называемые namespaces
-
-Теперь делаем процессу собственное представление о системе, для этого
-собираю сразу шесть namespaces:
-
-| Namespace | Что изолировано |
+| Namespace | Что изолирует |
 | --- | --- |
-| `pid` | Нумерация и видимость процессов |
-| `mnt` | Таблица монтирований и отдельный `/proc` |
+| `pid` | Нумерацию и видимость процессов |
+| `mnt` | Таблицу монтирований |
 | `net` | Интерфейсы, маршруты, сокеты и порты |
 | `uts` | Имя хоста |
 | `ipc` | System V IPC и POSIX message queues |
-| `user` | Отображение UID/GID и связанные с ним права |
+| `user` | Отображение UID/GID и область действия capabilities |
 
-После отдельных экспериментов итоговый запуск получился таким:
+Итоговая команда запуска:
 
 ```bash
 unshare \
@@ -190,37 +118,24 @@ unshare \
   bash -c 'hostname lab1-api; exec /tmp/lab1-api'
 ```
 
-`--fork` запускает `bash` первым процессом нового PID namespace. Затем `exec`
-заменяет его кодом API без создания нового процесса, поэтому PID 1 достается
-именно `lab1-api`, а не shell
+`exec` заменяет shell кодом API без создания нового процесса, поэтому сервис
+становится PID 1 в новом PID namespace.
 
-![Запуск API со всеми namespaces](docs/screenshots/part-02-all-namespaces-start.png)
+### PID снаружи и изнутри
 
-### процесс ОДИН, PIDа - два
+Сохранил внешний PID в `host_pid`. Фрагмент проверки с хоста:
 
-Снаружи API выглядит как обычный процесс с каким-то рандомным большим host PID. Но поле `NSpid` в
-`/proc/<pid>/status` показывает сразу два номера:
-
-```text
+```console
+$ ps -f -p "$host_pid"
+UID        PID     PPID  C STIME TTY      TIME     CMD
+david  3352039  3352038  0 22:26 pts/6    00:00:00 /tmp/lab1-api
+$ grep -E '^(Pid|PPid|NSpid):' "/proc/$host_pid/status"
+Pid:    3352039
+PPid:   3352038
 NSpid:  3352039  1
 ```
 
-Первый действует в PID namespace хоста, второй во вложенном. Это НЕ два процесса,
-а два имени одной задачи на разных уровнях видимости
-
-полагаю, что это вот ну очень важно понимать!
-
-![PID процесса с точки зрения хоста](docs/screenshots/part-02-pid-host.png)
-
-Одного PID namespace мало, ему нужен соответствующий `/proc`. `procfs` не обычная
-папка на диске, а виртуальное представление, которое ядро как-то собирает на лету.
-После нового mount команда `ps` наконец показывает только процессы внутри нашей
-изоляции 
-
-Первая попытка войти через `nsenter`, конечно же, не прошла гладко и закончилась
-`setgroups failed`. Непривилегированное отображение GID выставило
-`setgroups=deny`, а `nsenter` попытался снова поменять группы, добавляю
-`--preserve-credentials`, оставляю готовый UID/GID mapping в покое и захожу:
+Зашел в namespaces процесса:
 
 ```bash
 nsenter \
@@ -230,251 +145,239 @@ nsenter \
   -- bash
 ```
 
-![PID 1 и список процессов изнутри](docs/screenshots/part-02-pid-inside.png)
-
-### Root внутри, простой david снаружи
-
-UTS namespace получил hostname `lab1-api`, настоящий hostname ноута при этом
-остался `enigma-Aspire-A715-75G`
-
-User namespace отобразил UID 0 внутри на UID 1000 снаружи:
+Вывод `ps -ef` внутри:
 
 ```text
-внутренний UID 0 → внешний UID 1000
+UID   PID PPID C STIME TTY      TIME     CMD
+root    1    0 0 22:26 pts/6    00:00:00 /tmp/lab1-api
+root   10    0 0 22:37 pts/5    00:00:00 bash
+root   23   10 0 22:38 pts/5    00:00:00 ps -ef
 ```
 
-Внутри `id` показывает root, снаружи процесс все еще принадлежит `david`. Root полномочия действуют относительно
-созданных namespaces, а для объектов хоста ядро видит UID 1000 (взлома ж#№*ы не будет)
+Это один процесс с разными PID на двух уровнях видимости. Процессы хоста
+изнутри не видны.
 
-![Hostname, пользователь и UID mapping снаружи](docs/screenshots/part-02-uts-user-host.png)
+`procfs` - виртуальная файловая система ядра. Ее экземпляр показывает
+процессы, видимые в PID namespace процесса, выполнившего монтирование.
+Поэтому для корректного вывода `ps` нужен новый `/proc` внутри namespace,
+а не только отдельная нумерация PID. [Linux man-pages](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
 
-![Hostname, root и PID 1 изнутри](docs/screenshots/part-02-uts-user-inside.png)
+### UTS и user namespace
 
-### Две очереди с одним `msqid=0`
+В отдельной проверке снаружи получил:
 
-Чтобы IPC namespace не оставался абстракцией, создаю System V message queue на
-хосте:
-
-```bash
-host_queue_id=$(ipcmk -Q | awk '{print $NF}')
-ipcs -q
+```console
+$ hostname
+enigma-Aspire-A715-75G
+$ ps -o pid,user,uid,cmd -p "$host_pid"
+  PID USER      UID CMD
+46050 david    1000 /tmp/lab1-api
+$ cat "/proc/$host_pid/uid_map"
+         0       1000          1
 ```
 
-Изнутри хостовую очередь не видно. Более того, новая очередь внутри тоже получила
-`msqid=0`, но это другой объект ядра в другом IPC registry. Одинаковый номер тут
-не означает один и тот же объект
+Внутри соответствующих user и UTS namespaces:
 
-Очередь System V IPC живет не "внутри процесса" и не исчезает после завершения
-`ipcmk`, поэтому хостовую очередь удаляю явно:
-
-```bash
-ipcrm -q "$host_queue_id"
+```console
+# hostname
+lab1-api
+# id
+uid=0(root) gid=0(root) группы=0(root),65534(nogroup)
+# ps -f -p 1
+UID   PID PPID C STIME TTY      TIME     CMD
+root    1    0 0 13:31 pts/3    00:00:00 /tmp/lab1-api
 ```
 
-Внутренняя очередь исчезла вместе со своим IPC namespace
+UID 0 внутри отображается на UID 1000 снаружи. Имя хоста изменилось только
+в UTS namespace; root внутри не становится root хоста.
 
-![Разные очереди в host и IPC namespace](docs/screenshots/part-02-ipc.png)
+### IPC namespace
 
-### Своя сеть (пока без сети)
+Создал очередь сообщений на хосте и сравнил `ipcs -q`:
 
-После `--net` у процесса отдельный сетевой стек. Хостовый запрос к
-`127.0.0.1:8080` закономерно падает: loopback хоста и loopback внутри namespace
-вообще не родственники
+```text
+На хосте:
+ключ       msqid  владелец  права  исп. байты  сообщения
+0x70cbe835  0      david    644    0           0
 
-![API недоступен через loopback хоста](docs/screenshots/part-02-net-host.png)
+В IPC namespace до создания собственной очереди:
+ключ       msqid  владелец  права  исп. байты  сообщения
 
-Изначально внутри есть только `lo` в состоянии `DOWN`, маршрутов нет. Поднимаю
-внутренний loopback и проверяю API из той же сетевой изоляции:
-
-```bash
-ip link set lo up
-curl -i http://127.0.0.1:8080/health
+В IPC namespace после ipcmk -Q:
+ключ       msqid  владелец  права  исп. байты  сообщения
+0xc5b2d643  0      root     644    0           0
 ```
 
-200 OK?!?, но наружу мы от этого не выбрались. Для связи с хостом понадобятся
-`veth`, адреса, маршруты и forwarding/NAT или bridge, этим позже займется Docker
+Хостовая очередь не видна внутри. Совпадающий `msqid=0` относится к разным
+объектам в разных namespaces. Хостовую очередь удалил через `ipcrm`.
 
-![Пустая сеть и успешный запрос через внутренний loopback](docs/screenshots/part-02-net-inside.png)
+### Network namespace
 
-### Вывод
+С хоста соединение с API не устанавливается:
 
-Namespaces поменяли то, ЧТО процесс видит, но отдельного ядра не создали. Хост
-по-прежнему видит тот же процесс, а изнутри у него PID 1, свой hostname, IPC и
-сеть. Сколько ресурсов он может съесть, namespaces вообще не волнует, для этого
-нужны cgroups
+```console
+$ curl --max-time 2 --show-error http://127.0.0.1:8080/health
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Couldn't connect to server
+```
 
-## Часть 3 - cgroups, теперь ставим лимиты
+Внутри network namespace изначально есть только выключенный loopback, а
+`ip route` не выводит маршрутов:
 
-Namespaces никак не ограничивает прожорливость процесса!
-Для начала проверяю каждый controller cgroup v2 отдельно, а потом соберу все
-вместе в общем скрипте
+```console
+# ip link
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+# ip route
+# ip link set lo up
+# curl -i http://127.0.0.1:8080/health
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 3
 
-### Клетка на 64 МиБ
+ok
+```
 
-Создаю cgroup с потолком 64 МиБ, нулевым swap и групповым OOM:
+Loopback хоста и контейнера принадлежат разным сетевым стекам. Подъем
+внутреннего `lo` позволяет проверить сервис изнутри, но не связывает его с хостом.
+
+Вывод: namespaces изолировали представление о процессах, mounts, сети,
+hostname, IPC и пользователях, но не ограничили потребление ресурсов и
+не создали отдельного ядра.
+
+## Часть 3 - cgroups
+
+### Ограничение памяти
+
+Создал cgroup с лимитом 64 МиБ, отключенным swap и групповым OOM:
 
 ```bash
 sudo mkdir /sys/fs/cgroup/lab1-memory
 echo $((64 * 1024 * 1024)) | sudo tee /sys/fs/cgroup/lab1-memory/memory.max
 echo 0 | sudo tee /sys/fs/cgroup/lab1-memory/memory.swap.max
 echo 1 | sudo tee /sys/fs/cgroup/lab1-memory/memory.oom.group
-
-pid=$(pgrep -n -x lab1-api)
 echo "$pid" | sudo tee /sys/fs/cgroup/lab1-memory/cgroup.procs
 ```
 
-Перед нагрузкой отдельно проверяю две вещи: текущий PID действительно лежит в
-`/lab1-memory`, а `memory.events` пока по нулям. После этого прошу API удержать
-80 МиБ при лимите 64:
+Перед нагрузкой проверил членство процесса и нулевые OOM-счетчики:
 
-```bash
-curl --max-time 10 --show-error 'http://127.0.0.1:8080/eat?mb=80'
+```console
+$ cat "/proc/$pid/cgroup"
+0::/lab1-memory
+$ cat /sys/fs/cgroup/lab1-memory/memory.events
+low 0
+high 0
+max 0
+oom 0
+oom_kill 0
+oom_group_kill 0
+sock_throttled 0
 ```
 
-Ответа уже не будет, процесс получает `SIGKILL`
+Запрос сверх лимита завершился потерей соединения:
 
-![API завершен memory cgroup OOM killer](docs/screenshots/part-03-memory-killed.png)
+```console
+$ curl --max-time 10 --show-error 'http://127.0.0.1:8080/eat?mb=80'
+curl: (52) Empty reply from server
+$ cat /sys/fs/cgroup/lab1-memory/memory.events
+low 0
+high 0
+max 37
+oom 1
+oom_kill 2
+oom_group_kill 1
+sock_throttled 0
+$ cat /sys/fs/cgroup/lab1-memory/cgroup.procs
+```
 
-После запроса вижу `oom=1`, ненулевой `oom_kill`, `oom_group_kill=1` и пустой
-`cgroup.procs`. Значение `max=37` - это количество неудачных начислений памяти
-сверх `memory.max`, а не 37 запросов
+Процесс завершился, `cgroup.procs` пуст. OOM подтверждает рост `oom_kill`,
+а не сама ошибка `curl`. `max=37` отражает попытки превысить границу
+`memory.max`, а не количество HTTP-запросов.
+[Описание счетчиков cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files).
 
-![Настройка memory cgroup и OOM-счетчики](docs/screenshots/part-03-memory-oom.png)
+После перезапуска API новый процесс нужно снова поместить в тестовую cgroup:
+членство наследуется от родителя, а не закрепляется за именем бинарника.
 
-Тут я сам поймал полезную ошибку. После первого OOM поднял API заново, потому что забыл сделать скрин, но новый PID в `lab1-memory` не перенес. В итоге следующие
-запросы спокойно выделяли память, и несколько минут казалось, что лимит внезапно
-перестал работать
+### CPU quota и throttling
 
-На самом деле cgroup привязана к экземпляру процесса, а не к имени бинарника.
-Новый процесс наследует cgroup родителя или перемещается туда явно. Повторяю
-эксперимент уже с проверкой `cgroup.procs` и `/proc/<pid>/cgroup`, теперь все
-срабатывает предсказуемо
-
-Еще один важный момент: ошибка `curl` доказывает только потерю соединения.
-Настоящее доказательство OOM - рост `oom_kill` в `memory.events`. Сам controller
-API не перезапустит, в Kubernetes этим уже занимается kubelet/runtime вместе с
-restart policy
-
-### Пол-ядра и никакого суицида
-
-Теперь даю процессу 50 000 мкс CPU на каждые 100 000 мкс периода:
+Установил квоту 50 000 мкс CPU на период 100 000 мкс, то есть 0.5 CPU:
 
 ```bash
 sudo mkdir /sys/fs/cgroup/lab1-cpu
 echo '50000 100000' | sudo tee /sys/fs/cgroup/lab1-cpu/cpu.max
-pid=$(pgrep -n -x lab1-api)
 echo "$pid" | sudo tee /sys/fs/cgroup/lab1-cpu/cgroup.procs
-```
-
-Получается половина одного CPU. До нагрузки throttling по нулям:
-
-![CPU-квота и исходный cpu.stat](docs/screenshots/part-03-cpu-before.png)
-
-включаем `/burn`:
-
-```bash
 curl http://127.0.0.1:8080/burn
 ```
 
-В отличие от memory limit, процесс никто не убивает. После исчерпания 50 мс ядро
-откладывает его до следующего ~~семестра~~ периода, а в `cpu.stat` растут `nr_throttled` и
-`throttled_usec`
+Фрагменты `cpu.stat` до нагрузки и при двух последующих измерениях:
 
-![CPU throttling под нагрузкой](docs/screenshots/part-03-cpu-throttling.png)
+```text
+До /burn:
+nr_periods 2
+nr_throttled 0
+throttled_usec 0
 
-При повторной проверке `nr_periods` вырос с 221 до 825, а `nr_throttled` с 217 до
-821. Почти каждый период cgroup упирается в квоту, все честно
+После /burn:
+nr_periods 221
+nr_throttled 217
+throttled_usec 11343562
 
-![Рост счетчиков CPU throttling](docs/screenshots/part-03-cpu-growth.png)
+Повторная проверка:
+nr_periods 825
+nr_throttled 821
+throttled_usec 42663835
+```
 
-`ps` при этом показывал меньше 50%, потому что усреднял CPU за всю жизнь процесса,
-включая простой до `/burn`. Поэтому верим не одному снимку `ps`, а счетчикам
-controller
+Процесс не завершился. После исчерпания квоты ядро ограничивает выполнение
+до следующего периода. За интервал между двумя последними измерениями
+`nr_periods` и `nr_throttled` выросли на 604: throttling возникал в каждом
+учитываемом периоде.
 
-### Запрет на создание задач
+### Ограничение количества задач
 
-Для fork нагрузки создаю отдельную cgroup с потолком 20 задач:
+Создал cgroup с `pids.max=20` и поместил в нее отдельный shell. Дочерние
+процессы наследуют его cgroup:
 
 ```bash
 sudo mkdir /sys/fs/cgroup/lab1-pids
 echo 20 | sudo tee /sys/fs/cgroup/lab1-pids/pids.max
-```
-
-Перемещаю туда дочерний shell. Все его будущие дети автоматически унаследуют эту
-cgroup и ее лимит:
-
-```bash
-# Терминал 1
-bash
-echo $$
-```
-
-```bash
-# Терминал 2
-shell_pid=<PID_ИЗ_ПЕРВОГО_ТЕРМИНАЛА>
 echo "$shell_pid" | sudo tee /sys/fs/cgroup/lab1-pids/cgroup.procs
 ```
 
-![Настройка pids cgroup и дочерний shell](docs/screenshots/part-03-pids-before.png)
+Из этого shell запустил `stress-ng --fork 100 --timeout 10s --metrics-brief`.
+Значимые результаты:
 
-Из дочернего shell запускаю нагрузку:
+```text
+До нагрузки:
+pids.max:    20
+pids.events: max 0
 
-```bash
-stress-ng --fork 100 --timeout 10s --metrics-brief
+Во время нагрузки:
+pids.max:    20
+pids.events: max 254569
+
+После остановки нагрузки:
+pids.current: 1
+pids.events:  max 255018
 ```
 
-`stress-ng` просит 100 workers, но cgroup заполняется ровно до
-`pids.current=20`. Счетчик `max` в `pids.events` улетает в сотни тысяч, каждая
-такая попытка означает отклоненный ядром `fork/clone`
+Счетчик `max` подтверждает отказы создания новых задач при достижении лимита.
+Существующие задачи controller не убивает. После завершения workers остался
+shell, счетчик отказов сохранился.
 
-![Достижение pids.max и отказы fork](docs/screenshots/part-03-pids-limit.png)
+Вывод: memory limit приводит к OOM, CPU quota к throttling, а `pids.max`
+к отказам новых `fork/clone`. Это три разных механизма ограничения ресурсов.
 
-Останавливаю нагрузку через `Ctrl+C`. Существующие процессы cgroup не убивает,
-она просто запрещает создавать новые. После завершения workers `pids.current`
-возвращается к одному, накопленный счетчик отказов остается
+## Часть 4 - capabilities и seccomp
 
-![Завершение stress-ng](docs/screenshots/part-03-pids-stress.png)
+### Сброс capabilities
 
-![Состояние pids controller после нагрузки](docs/screenshots/part-03-pids-after.png)
-
-### Вывод
-
-| Ресурс | Настройка | Поведение при достижении предела | Доказательство |
-| --- | --- | --- | --- |
-| Память | `memory.max` | OOM и принудительное завершение | `memory.events:oom_kill` |
-| CPU | `cpu.max` | Приостановка до следующего периода | `cpu.stat:nr_throttled` |
-| Процессы | `pids.max` | Отказ нового `fork/clone` | `pids.events:max` |
-
-Cgroups ограничили то, что namespaces даже не пытаются контролировать: память,
-процессорное время и количество задач
-
-p.s. слишком много знаний для разраба
-
-![Ментальная модель Docker до и после первой лекции](docs/images/docker-before-after.png)
-
-## Часть 4 - root еще не суперсила
-
-Стены и лимиты готовы, но остается вопрос: что процессу вообще разрешено просить
-у ядра? Здесь нужны два разных механизма, capabilities и seccomp
-
-### UID 0 недостаточно
-
-Сначала создаю user namespace вместе с отдельным UTS namespace:
+В user и UTS namespaces UID 0 сначала смог изменить hostname:
 
 ```bash
 unshare --user --map-root-user --uts bash
-```
-
-Внутри `id` показывает `uid=0(root)`, а effective set пока содержит capabilities.
-`CAP_SYS_ADMIN`, например, разрешает изменить hostname внутри UTS namespace:
-
-```bash
 hostname capability-demo
 ```
 
-![Root с capabilities меняет hostname](docs/screenshots/part-04-capabilities-before.png)
-
-Теперь очищаю capability sets перед запуском нового shell:
+Затем запустил shell без capabilities и повторил операцию:
 
 ```bash
 setpriv \
@@ -489,68 +392,39 @@ setpriv \
   '
 ```
 
-`id` все еще показывает UID 0, но `Current` и `Bounding set` уже пустые, а
-`hostname should-not-work` закономерно получает отказ. Имя остается
-`capability-demo`
+Фрагмент вывода:
 
-![UID 0 без capabilities не меняет hostname](docs/screenshots/part-04-capabilities-after.png)
-
-ТАКИМ образом, получается, что UID 0 описывает идентичность, но не дает автоматический пропуск на
-привилегированную операцию. Ядро отдельно ищет нужную capability в effective set.
-Bounding set ограничивает то, что вообще можно получить после `exec`, а
-`no_new_privs` запрещает повысить привилегии через setuid или file capabilities
-
-Но для API суперсилы и не нужны: порт 8080, память и CPU нагрузка работают с
-пустым набором capabilities
-
-### Seccomp, запрещаем сам syscall
-
-Capabilities отвечают за классы привилегированных действий, но не задают список
-syscalls. Для этого собираю отдельный [`seccomp-profile.json`](seccomp-profile.json):
-
-```json
-{
-  "defaultAction": "SCMP_ACT_ALLOW",
-  "syscalls": [
-    {
-      "names": ["unshare", "setns"],
-      "action": "SCMP_ACT_ERRNO",
-      "errnoRet": 1
-    }
-  ]
-}
+```text
+uid=0(root) gid=0(root) группы=0(root),65534(nogroup)
+Current: =
+Bounding set =
+hostname: you must be root to change the host name
 ```
 
-Это учебный denylist, НЕ production allowlist: остальные syscalls разрешены, а
-`unshare(2)` и `setns(2)` возвращают `errno=1`, то есть `EPERM`
+Hostname остался `capability-demo`. UID 0 недостаточно: для операции нужна
+соответствующая capability. `no_new_privs` дополнительно запрещает повышение
+привилегий при `exec`.
 
-Сам JSON, конечно, ничего в ядро не загрузит. Мой `setpriv` seccomp filters не
-поддерживает, поэтому появился небольшой
-[`seccomp-launcher.py`](seccomp-launcher.py): читает профиль, собирает filter через
-`libseccomp`, загружает его и через `exec` превращается в целевую программу
+### Seccomp
 
-Проверка максимально топорная: без фильтра `unshare` работает, с тем же вызовом
-через launcher получаю `Operation not permitted`
+В [seccomp-profile.json](seccomp-profile.json) запретил `unshare` и `setns`
+с возвратом `EPERM`. Остальные syscalls разрешены; это учебный denylist,
+не production allowlist.
 
-```bash
-unshare --user --map-root-user true \
-  && echo "unshare without seccomp: allowed"
+[seccomp-launcher.py](seccomp-launcher.py) загружает профиль через
+`libseccomp`, затем выполняет целевую программу через `exec`.
 
-python3 seccomp-launcher.py \
-  seccomp-profile.json \
-  unshare --user --map-root-user true
+Проверка одинакового syscall без фильтра и с ним:
+
+```console
+$ unshare --user --map-root-user true && echo "unshare without seccomp: allowed"
+unshare without seccomp: allowed
+$ python3 seccomp-launcher.py seccomp-profile.json unshare --user --map-root-user true
+unshare: unshare failed: Операция не позволена
 ```
 
-![Отказ syscall unshare под seccomp](docs/screenshots/part-04-seccomp-unshare.png)
-
-Теперь запускаю через тот же launcher сам API:
-
-```bash
-python3 seccomp-launcher.py seccomp-profile.json /tmp/lab1-api
-```
-
-`/health` продолжает отвечать HTTP 200, а `/proc` подтверждает, что filter пережил
-`exec` и висит уже на API:
+API под тем же фильтром продолжил отвечать `HTTP/1.1 200 OK`, тело `ok`.
+Поля `/proc/<pid>/status`:
 
 ```text
 NoNewPrivs:       1
@@ -558,96 +432,69 @@ Seccomp:          2
 Seccomp_filters:  1
 ```
 
-![Работающий API с seccomp-фильтром](docs/screenshots/part-04-seccomp-api.png)
+Вывод: capabilities ограничивают привилегированные операции, seccomp
+фильтрует вход в syscalls. Фильтр сохраняется после `exec` и действует
+независимо от UID и наличия capabilities.
 
-`exec` заменил код launcher кодом API, но нового процесса не создал. PID и
-seccomp state сохранились, поэтому API наследует filter и уже не может его
-ослабить. `Seccomp: 2` означает filter mode, `NoNewPrivs: 1` запрещает получить
-новые привилегии через следующие `exec`
+## Часть 5 - собственный launcher и сравнение с Docker
 
-### Вывод
-
-Capabilities и seccomp не конкурируют, а закрывают разные уровни:
-
-| Механизм | Что ограничивает | Результат эксперимента |
-| --- | --- | --- |
-| Capabilities | Отдельные классы привилегированных операций | UID 0 без нужной capability не смог изменить hostname |
-| Seccomp | Вход в конкретные syscalls | `unshare(2)` получил `EPERM`, при этом API продолжил работать |
-
-Даже `CAP_SYS_ADMIN` не перепрыгнет запрещенный seccomp syscall. Filter
-срабатывает при входе в системный вызов независимо от UID и capabilities
-
-## Часть 5 - собираю свой Docker
-
-Вся база на базе, пора собирать все в один скрипт
-[`mydocker.sh`](mydocker.sh), который одной командой уже запускает API с изоляцией, лимитами и
-урезанными правами
-
-### Шлагбаум перед запуском
-
-Сначала скрипт создает одну cgroup `lab1-mydocker` и включает в ней сразу все
-проверенные ограничения:
-
-| Контроллер | Значение |
-| --- | --- |
-| `memory.max` | 64 МиБ (`67108864`) |
-| `memory.swap.max` | `0` |
-| `memory.oom.group` | `1` |
-| `cpu.max` | `50000 100000` (половина CPU) |
-| `pids.max` | `20` |
-
-Потом `unshare` собирает user, PID, mount, UTS, IPC и network namespaces. Но тут
-есть гонка: API не должен успеть стартовать до попадания под лимиты. Поэтому между
-созданием процесса и запуском стоит шлагбаум на FIFO:
+[mydocker.sh](mydocker.sh) объединяет проверенные namespaces, cgroup-лимиты и
+ограничения прав. Между созданием дочернего процесса и запуском API стоит FIFO:
 
 ```text
-unshare создает bash → bash блокируется на read из FIFO
-                    → host находит PID bash
-                    → host записывает PID в cgroup.procs
-                    → host пишет start в FIFO
-                    → bash продолжает запуск
+unshare -> shell ждет на FIFO
+        -> launcher помещает host PID shell в cgroup
+        -> launcher открывает FIFO
+        -> shell настраивает hostname и loopback
+        -> exec setpriv -> exec seccomp-launcher -> exec API
 ```
 
-`read` встроен в Bash, значит во время ожидания не появляется лишний дочерний
-процесс вне cgroup. Только после записи host PID в `cgroup.procs` внешний скрипт
-отправляет `start` и открывает шлагбаум
+Это устраняет гонку, при которой API мог бы стартовать до установки лимитов.
+Сетевые настройки выполняются до сброса capabilities. Цепочка `exec`
+сохраняет PID, namespaces, cgroup membership и seccomp filter.
 
-Дальше процесс ставит hostname `lab1-api` и включает внутренний loopback. Важно
-сделать это ДО сброса capabilities, пока у root в user namespace еще есть нужные
-полномочия. После этого начинается цепочка `exec`:
+Запуск:
+
+```console
+$ ./mydocker.sh
+memory.max: 67108864
+memory.swap.max: 0
+memory.oom.group: 1
+cpu.max: 50000 100000
+pids.max: 20
+API started; press Ctrl+C to stop
+```
+
+Фрагмент отдельной проверки изоляции с хоста:
 
 ```text
-bash PID 1
-  → setpriv без capabilities и с no_new_privs
-  → seccomp-launcher.py
-  → lab1-api PID 1
+Pid:    571495
+PPid:   571491
+NSpid:  571495  1
+0::/lab1-mydocker
 ```
 
-Ни один `exec` не создает новый процесс, поэтому API сохраняет PID 1, namespaces
-и cgroup membership. На `Ctrl+C` trap останавливает `unshare`, добивает остатки
-через `cgroup.kill`, удаляет cgroup и FIFO. Не daemon, конечно, но за собой убирает
+Запрос с хоста не установил соединение. Запрос через `nsenter` в network
+namespace сервиса вернул `HTTP/1.1 200 OK` с телом `ok`. Hostname внутри
+равен `lab1-api`, поля прав процесса:
 
-![Запуск API через mydocker.sh](docs/screenshots/part-05-mydocker-start.png)
+```text
+CapInh:          0000000000000000
+CapPrm:          0000000000000000
+CapEff:          0000000000000000
+CapBnd:          0000000000000000
+CapAmb:          0000000000000000
+NoNewPrivs:      1
+Seccomp:         2
+Seccomp_filters: 1
+```
 
-Снаружи у API обычный большой host PID, внутри он PID 1. `NSpid` показывает оба
-номера ОДНОГО процесса, а `/proc/<pid>/cgroup` подтверждает
-`/lab1-mydocker`. Хостовый loopback сервис не видит, зато через `nsenter` получаю
-HTTP 200:
+При остановке launcher завершает процессы и удаляет созданные cgroup и FIFO.
 
-![PID, cgroup и отдельная сеть mydocker.sh](docs/screenshots/part-05-mydocker-isolation.png)
+### Тот же сервис через Docker
 
-В финале все capability sets пустые, `NoNewPrivs: 1`, `Seccomp: 2`, а hostname и
-`/health` при этом на месте
-
-![Права и работа API в mydocker.sh](docs/screenshots/part-05-mydocker-security.png)
-
-### Теперь тот же API через настоящий Docker
-
-Dockerfile относится уже к следующей части, поэтому пока не забегаю вперед.
-Готовый бинарб монтирую read-only в локальный `ubuntu:22.04`. Он требует не
-выше `GLIBC_2.34`, образ подходит
-
-Запускаю Docker с теми же лимитами и моделью прав:
+До создания собственного образа бинарник монтировал read-only в контейнер.
+Запустил его с сопоставимыми лимитами и тем же seccomp-профилем:
 
 ```bash
 sudo docker run \
@@ -667,51 +514,543 @@ sudo docker run \
   /lab1-api
 ```
 
-`--memory-swap` равен `--memory`, поэтому дополнительного swap нет.
-Пользовательский seccomp profile специально заменяет встроенный профиль Docker,
-иначе сравнение с `mydocker.sh` было бы нечестным
+Равные `--memory-swap` и `--memory` отключают дополнительный swap.
+Пользовательский seccomp-профиль заменяет встроенный профиль Docker.
 
-![Запуск того же API через Docker](docs/screenshots/part-05-docker-run.png)
-
-И вот первая разница видна сразу: `127.0.0.1:8080:8080` делает сервис доступным с
-хоста, хотя network namespace отдельный. Внутри API PID 1, снаружи PID `616095`.
-Docker с cgroup driver `systemd` кладет контейнер в отдельный scope:
+Проверка с хоста:
 
 ```text
-/system.slice/docker-<container-id>.scope
-```
+HTTP/1.1 200 OK
+ok
 
-Высокоуровневые Docker flags в итоге превращаются в уже знакомые файлы cgroup v2:
-
-```text
+Pid:    616095
+NSpid:  616095  1
 memory.max:      67108864
 memory.swap.max: 0
 cpu.max:         50000 100000
 pids.max:        20
 ```
 
-Изнутри на месте hostname, PID 1, нулевые `CapEff` и `CapBnd`, `NoNewPrivs: 1` и
-seccomp filter mode. Никакой второй тайной системы лимитов докер не придумал
+Изнутри:
 
-![PID, cgroup, лимиты и права Docker-контейнера](docs/screenshots/part-05-docker-verification.png)
+```text
+hostname: lab1-api
+Pid:      1
+NSpid:    1
+CapEff:   0000000000000000
+CapBnd:   0000000000000000
+NoNewPrivs:      1
+Seccomp:         2
+Seccomp_filters: 1
+```
 
-### Что совпало, а где мы пока на честном слове
+Docker с systemd cgroup driver создал отдельный scope в `/system.slice`.
+Его CLI-флаги преобразовались в те же значения cgroup v2.
 
 | Область | `mydocker.sh` | Docker |
 | --- | --- | --- |
-| Namespaces | Создаются напрямую через `unshare` | Настраиваются OCI runtime `runc` |
-| Cgroups | Фиксированная cgroup создается и удаляется скриптом | `dockerd` управляет systemd scope и метаданными контейнера |
-| Ресурсы | Прямая запись в файлы cgroup v2 | Флаги CLI преобразуются в те же файлы cgroup v2 |
-| Права | `setpriv` и отдельный Python launcher | OCI-конфигурация для capabilities, `no_new_privs` и seccomp |
-| Сеть | Только отдельный `lo`, связи с хостом нет | `veth`, bridge и правила публикации портов |
-| Файловая система | Новая mount table и `/proc`, но корень хоста остается видимым | Отдельный rootfs из слоев образа и управляемые mounts |
-| Дополнительная защита | AppArmor и cgroup namespace не настроены | Доступны AppArmor (`docker-default`) и отдельный cgroup namespace |
-| Жизненный цикл | Shell, поиск дочернего PID и cleanup через trap | Daemon, имена, inspect, logs, автоматическое удаление через `--rm` |
-| PID 1 | API является PID 1 | API также PID 1; init появится только с `--init` |
+| Namespaces | Прямой вызов `unshare` | OCI runtime `runc` |
+| Cgroups и лимиты | Запись в файлы cgroup v2 | Настройка через daemon/runtime |
+| Права | `setpriv` и seccomp launcher | OCI-конфигурация |
+| Сеть | Только отдельный loopback | `veth`, bridge, публикация портов |
+| Файловая система | Новая mount table, но корень хоста остается видимым | Отдельный rootfs из образа |
+| Дополнительная защита | AppArmor и cgroup namespace не настроены | Доступны AppArmor и cgroup namespace |
+| Жизненный цикл | Shell и cleanup через trap | Имена, inspect, logs, управление контейнером |
+| PID 1 | Сам API | Сам API; init добавляется через `--init` |
 
-Низкоуровневые значения совпали, Docker не заменяет namespaces и cgroups какой-то
-секретной магией. Он надежно собирает их вместе и добавляет rootfs, сеть, security
-policies, метаданные и нормальный lifecycle management
+Вывод: Docker использует те же primitives ядра, но добавляет файловую систему,
+сеть, security policies и управление жизненным циклом. Общее ядро хоста
+остается у обоих вариантов.
 
-Наш скрипт доказал главный принцип, но до production runtime ему еще очень далеко.
-И да, оба варианта по-прежнему используют ОБЩЕЕ ядро хоста
+## Часть 6 - образы и хранение данных
+
+### Single-stage и multi-stage
+
+Собрал два образа:
+
+```bash
+sudo docker build --file api/Dockerfile.single --tag lab1-api:single api
+sudo docker build --file api/Dockerfile --tag lab1-api:multi api
+```
+
+[Dockerfile.single](api/Dockerfile.single) оставляет в финальном образе
+Debian, Go SDK, исходники и результаты сборки.
+[Dockerfile](api/Dockerfile) компилирует API в builder stage и копирует только
+бинарник в `scratch`. Для сборки без зависимости от libc используется
+`CGO_ENABLED=0`.
+
+Результат сравнения:
+
+```console
+$ sudo docker image inspect lab1-api:single lab1-api:multi --format '{{index .RepoTags 0}} size={{.Size}} bytes, layers={{len .RootFS.Layers}}'
+lab1-api:single size=897939902 bytes, layers=12
+lab1-api:multi size=5623992 bytes, layers=1
+```
+
+Multi-stage образ примерно в 160 раз меньше, экономия около 99.37%.
+Оба образа успешно запустились, `/health` вернул `200 OK` и `ok`.
+
+В `docker history` multi-stage образа единственный файловый слой занимает
+5.62 МБ. `EXPOSE` и `ENTRYPOINT` меняют метаданные, но не добавляют файлов.
+
+### Кеш повторной сборки
+
+Фрагмент повторной сборки без изменений, промежуточные image ID опущены:
+
+```text
+Step 3/10 : COPY go.mod ./
+ ---> Using cache
+Step 4/10 : RUN go mod download
+ ---> Using cache
+Step 5/10 : COPY main.go ./
+ ---> Using cache
+Step 6/10 : RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/lab1-api .
+ ---> Using cache
+Step 8/10 : COPY --from=build /out/lab1-api /lab1-api
+ ---> Using cache
+Successfully built 65a19e3f42d2
+Successfully tagged lab1-api:multi
+```
+
+`go.mod` копируется раньше исходников, поэтому изменение `main.go` не
+инвалидирует кеш установки зависимостей. Без изменений все повторно
+используемые шаги взяты из кеша.
+
+### Writable layer
+
+Через `docker cp` записал файл в контейнер и прочитал его обратно:
+
+```console
+$ sudo docker run --detach --name lab1-storage lab1-api:multi
+$ printf 'hello from container writable layer\n' > /tmp/lab1-state.txt
+$ sudo docker cp /tmp/lab1-state.txt lab1-storage:/state.txt
+$ sudo docker cp lab1-storage:/state.txt /tmp/lab1-before-recreate.txt
+$ cat /tmp/lab1-before-recreate.txt
+hello from container writable layer
+```
+
+Удалил контейнер и создал новый из того же образа:
+
+```console
+$ sudo docker rm --force lab1-storage
+lab1-storage
+$ sudo docker run --detach --name lab1-storage lab1-api:multi
+$ sudo docker cp lab1-storage:/state.txt /tmp/lab1-after-recreate.txt
+Error response from daemon: Could not find the file /state.txt in container lab1-storage
+```
+
+Изменения writable layer не входят в образ и исчезают при удалении
+контейнера. Обычный stop/start того же контейнера сохранил бы файл.
+
+### Named volume
+
+Повторил опыт с томом `lab1-data`, подключенным в `/data`:
+
+```bash
+sudo docker rm --force lab1-storage
+sudo docker volume create lab1-data
+sudo docker run --detach --name lab1-storage \
+  --mount type=volume,source=lab1-data,target=/data \
+  lab1-api:multi
+sudo docker cp /tmp/lab1-state.txt lab1-storage:/data/state.txt
+```
+
+Пересоздал контейнер с тем же томом:
+
+```bash
+sudo docker rm --force lab1-storage
+sudo docker run --detach --name lab1-storage \
+  --mount type=volume,source=lab1-data,target=/data \
+  lab1-api:multi
+```
+
+Проверка файла и mount:
+
+```console
+$ sudo docker cp lab1-storage:/data/state.txt /tmp/lab1-volume-after.txt
+$ cat /tmp/lab1-volume-after.txt
+hello from container writable layer
+$ sudo docker inspect --format '{{range .Mounts}}{{println "type=" .Type "name=" .Name "destination=" .Destination}}{{end}}' lab1-storage
+type= volume name= lab1-data destination= /data
+```
+
+Файл сохранился. Named volume существует независимо от контейнера и
+удаляется отдельно. `docker volume prune` по умолчанию затрагивает только
+неиспользуемые anonymous volumes; named volumes включаются с `--all`.
+[Документация Docker](https://docs.docker.com/reference/cli/docker/volume/prune/).
+
+Вывод: образ задает исходный rootfs, writable layer хранит изменения
+конкретного контейнера, volume сохраняет данные между его пересозданиями.
+Multi-stage уменьшил образ, не изменив поведение API.
+
+## Часть 7 - gVisor
+
+Установил `runsc` из официального release-репозитория gVisor, зарегистрировал
+runtime в Docker и перезапустил daemon:
+
+```bash
+sudo runsc install
+sudo systemctl restart docker
+```
+
+Проверка запуска:
+
+```console
+$ sudo docker run --rm --runtime=runsc hello-world
+Hello from Docker!
+This message shows that your installation appears to be working correctly.
+```
+
+Тот же API запустил с дополнительной опцией `--runtime=runsc`:
+
+```bash
+sudo docker run \
+  --rm --detach \
+  --runtime=runsc \
+  --name lab1-gvisor \
+  --publish 127.0.0.1:8080:8080 \
+  lab1-api:multi
+```
+
+Результат:
+
+```console
+$ sudo docker inspect --format 'runtime={{.HostConfig.Runtime}} status={{.State.Status}} host_pid={{.State.Pid}}' lab1-gvisor
+runtime=runsc status=running host_pid=64274
+$ curl -i http://127.0.0.1:8080/health
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 3
+
+ok
+```
+
+На хосте в `ps` видны процессы `runsc-gofer`, `runsc-sandbox` и
+`runsc-fd-parking`.
+
+### Отличие от обычного контейнера
+
+Сравнил вывод `uname` хоста и диагностического `ubuntu:22.04` под двумя
+runtime. Полученные версии:
+
+```text
+host:  7.0.0-28-generic
+runc:  7.0.0-28-generic
+runsc: 4.19.0-gvisor
+```
+
+Обычный контейнер использует ядро хоста. `4.19.0-gvisor` является
+синтетической версией Linux API, а не версией ядра отдельно загруженной VM.
+
+Sentry реализует Linux API в userspace. Syscalls приложения сначала
+обрабатываются им, а не передаются в host kernel один в один.
+Gofer контролирует доступные деревья файловой системы. При Directfs,
+включенном по умолчанию в современном `runsc`, Sentry может обращаться к
+разрешенным деревьям через переданные Gofer file descriptors.
+[Архитектура gVisor](https://gvisor.dev/docs/),
+[Directfs](https://gvisor.dev/docs/user_guide/filesystem/#directfs).
+
+| Свойство | `mydocker.sh` | Docker + `runc` | Docker + `runsc` |
+| --- | --- | --- | --- |
+| Обработка syscalls API | Host kernel | Host kernel | Sentry |
+| Файловая система | Корень хоста видим | Отдельный rootfs | Rootfs с контролируемым доступом |
+| Сеть | Изолированный loopback | Сетевой стек host kernel | Обычно userspace netstack gVisor |
+| Совместимость | Нативная Linux | Нативная Linux | Возможны ограничения Linux API |
+| Дополнительные расходы | Launcher | Daemon/runtime | Sentry, Gofer, обработка syscalls и сеть |
+
+Предел обычной контейнерной изоляции - общее ядро: уязвимость в доступном
+kernel interface может позволить выйти за границу контейнера.
+gVisor уменьшает поверхность атаки, добавляя независимую реализацию Linux API
+между приложением и host kernel. При этом Sentry и Gofer остаются процессами
+хоста, а дополнительная защита имеет цену в производительности и совместимости.
+
+## Часть 8 - мониторинг
+
+Собрал историю памяти, CPU и throttling API через cAdvisor, Prometheus и
+Grafana. Стенд на kind и Helm можно переиспользовать в следующей лабораторной.
+
+```text
+ядро / cgroups -> kubelet / cAdvisor -> Prometheus -> Grafana
+Kubernetes API -> kube-state-metrics -> Prometheus -> Grafana
+```
+
+Ресурсные метрики приходят через kubelet `/metrics/cadvisor`, а число
+рестартов и причина завершения - через kube-state-metrics. Самому API
+ручку `/metrics` в этой части не добавлял.
+
+### Конфигурация стенда
+
+- [kind.yaml](observability/kind.yaml): кластер `itmo-observability`,
+  одна control-plane node, image Kubernetes `v1.37.0` закреплен digest.
+- [api.yaml](observability/api.yaml): Deployment `lab1-api`, namespace `lab1`.
+- [monitoring-values.yaml](observability/monitoring-values.yaml): Helm values.
+- [lab1-dashboard.json](observability/lab1-dashboard.json): экспорт трех панелей.
+
+После создания кластера kind `0.33.0` node получила состояние `Ready`.
+Образ `lab1-api:multi` загрузил из Docker хоста во внутренний containerd
+через `kind load docker-image`.
+
+Проверка первого развертывания API:
+
+```console
+$ kubectl -n lab1 rollout status deployment/lab1-api --timeout=120s
+deployment "lab1-api" successfully rolled out
+$ kubectl -n lab1 get pods
+NAME                      READY   STATUS    RESTARTS
+lab1-api-c6b959ccc-w4lnl    1/1     Running   0
+```
+
+| Ресурс API | Request | Limit |
+| --- | --- | --- |
+| CPU | `100m` | `500m`, то есть 0.5 CPU |
+| Память | `16Mi` | `64Mi` |
+
+Request используется для размещения и учета ресурсов, а limit задает потолок.
+Контейнер работает с UID `65532`, read-only rootfs, `drop: ALL`,
+запретом privilege escalation и seccomp `RuntimeDefault`.
+Readiness probe проверяет `/health`.
+
+Мониторинг установил chart `kube-prometheus-stack` версии `91.8.2`:
+
+```bash
+helm upgrade --install monitoring \
+  oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
+  --version 91.8.2 \
+  --namespace monitoring \
+  --create-namespace \
+  --values observability/monitoring-values.yaml \
+  --wait \
+  --timeout 10m
+```
+
+Результат установки и проверки хранилища:
+
+```text
+NAME: monitoring
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+
+NAME                                                                    STATUS  CAPACITY  STORAGECLASS
+monitoring-grafana                                                      Bound   1Gi       standard
+prometheus-monitoring-prometheus-db-prometheus-monitoring-prometheus-0  Bound   5Gi       standard
+```
+
+Prometheus, Grafana, Operator, kube-state-metrics и Alertmanager получили
+состояние `Running`, все контейнеры готовы. Default dashboards и default
+alert rules отключены.
+
+Scrape и evaluation interval - `15s`. Retention Prometheus - `24h`,
+ограничение размера данных - `3GB`. PVC сохраняет данные при замене Pod,
+но local-path storage внутри kind node не переживает удаление всего кластера.
+После перезапуска компьютера сохраненный дашборд остался доступен.
+
+Для `container_spec_*` в values сохранены cAdvisor-метрики без стандартной
+фильтрации chart: `cAdvisorMetricRelabelings: []`.
+
+### Дашборд
+
+В Grafana `13.2.3` создал Time series панели с источником `Prometheus`,
+UID `prometheus`, режимом запросов Range. Экспорт настроен на последние
+30 минут и обновление раз в `10s`; refresh браузера не меняет scrape interval.
+
+**Память и лимит**, единицы `bytes (IEC)`, минимум 0:
+
+```promql
+container_memory_usage_bytes{namespace="lab1", container="api"}
+```
+
+```promql
+container_spec_memory_limit_bytes{namespace="lab1", container="api"}
+```
+
+Легенды: `usage {{pod}}`, `limit {{pod}}`. Usage является gauge и включает
+память контейнера, в том числе cache, а не только Go heap.
+
+**CPU и квота**, единицы `cores`, минимум 0:
+
+```promql
+sum by (pod) (
+  rate(container_cpu_usage_seconds_total{namespace="lab1", container="api"}[2m])
+)
+```
+
+```promql
+container_spec_cpu_quota{namespace="lab1", container="api"}
+/
+container_spec_cpu_period{namespace="lab1", container="api"}
+```
+
+Легенды: `usage {{pod}}`, `quota {{pod}}`. Counter CPU-секунд преобразуется
+через `rate` в CPU-секунды на секунду. Значение 0.5 соответствует половине
+одного CPU. `rate` применяется до агрегации, чтобы учитывать resets каждого
+счетчика. [Описание rate](https://prometheus.io/docs/prometheus/latest/querying/functions/#rate).
+
+**Доля периодов с CPU throttling**, единицы `Percent (0-100)`, границы 0-100:
+
+```promql
+100 *
+sum by (pod) (
+  rate(container_cpu_cfs_throttled_periods_total{namespace="lab1", container="api"}[2m])
+)
+/
+sum by (pod) (
+  rate(container_cpu_cfs_periods_total{namespace="lab1", container="api"}[2m])
+)
+```
+
+Легенда: `throttled periods {{pod}}`. Это доля учитываемых CFS periods с
+throttling, не процент загрузки и не доля потерянного CPU-времени.
+[Определения метрик cAdvisor](https://github.com/google/cadvisor/blob/master/docs/storage/prometheus.md).
+
+![Дашборд до нагрузки](docs/screenshots/part-08-dashboard-baseline.png)
+
+До нагрузки API почти не использовал CPU, throttling был около нуля.
+На графиках видны memory limit 64 МиБ и CPU quota 0.5 CPU.
+
+### Нагрузка без OOM
+
+После проверки `/health` один раз вызвал `/eat?mb=32`:
+
+```console
+$ curl --max-time 10 -i 'http://127.0.0.1:8080/eat?mb=32'
+HTTP/1.1 200 OK
+allocated and retained 32 MiB (blocks retained: 1)
+```
+
+Память выросла примерно с 8 до 40 МиБ и осталась на этом уровне, поскольку
+приложение удерживает ссылки на выделенные блоки.
+
+![Дополнительные 32 МиБ памяти](docs/screenshots/part-08-memory-load.png)
+
+Затем включил CPU-нагрузку:
+
+```console
+$ curl --max-time 10 -i http://127.0.0.1:8080/burn
+HTTP/1.1 200 OK
+started burning one CPU core
+```
+
+HTTP-запрос завершился, фоновый цикл продолжил работу. CPU достиг примерно
+0.5 CPU, throttling сначала поднялся до 90-95%, затем на истории до 100%.
+
+![CPU под квотой и throttling](docs/screenshots/part-08-cpu-throttling-load.png)
+
+Плавный рост CPU объясняется усреднением `rate(...[2m])`, а не постепенным
+запуском нагрузки. 0.5 CPU и 100% throttled periods совместимы: worker
+получает CPU, но исчерпывает квоту в каждом учитываемом периоде.
+
+Для остановки цикла и очистки памяти выполнил rollout restart API.
+Новый Pod `lab1-api-f44995554-8qrq7` стартовал с нулем рестартов.
+
+### OOM и восстановление
+
+На новом экземпляре проверил `/health` и один раз запросил 96 МиБ при
+лимите 64 МиБ:
+
+```console
+$ curl --max-time 10 -i 'http://127.0.0.1:8080/eat?mb=96'
+curl: (52) Empty reply from server
+$ kubectl -n lab1 get pods -l app=lab1-api
+NAME                       READY   STATUS    RESTARTS      AGE
+lab1-api-f44995554-8qrq7     1/1     Running   1 (41s ago)   16m
+```
+
+Фрагмент `kubectl describe pod`:
+
+```text
+State:          Running
+  Started:      Sun, 04 Oct 2026 01:05:41 +0300
+Last State:     Terminated
+  Reason:       OOMKilled
+  Exit Code:    137
+  Finished:     Sun, 04 Oct 2026 01:05:40 +0300
+Ready:          True
+Restart Count:  1
+```
+
+Ядро завершило процесс, kubelet через runtime перезапустил контейнер.
+Имя и UID Pod сохранились, изменился container ID: новый Pod не создавался.
+
+В Prometheus проверил:
+
+```promql
+kube_pod_container_status_restarts_total{namespace="lab1", container="api"}
+```
+
+```promql
+kube_pod_container_status_last_terminated_reason{
+  namespace="lab1", container="api", reason="OOMKilled"
+}
+```
+
+Оба запроса вернули `1`. Первый - counter рестартов, второй - gauge
+последней причины завершения, не счетчик OOM.
+[Метрики kube-state-metrics](https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/pod-metrics.md).
+
+![История нагрузки и состояние после OOM](docs/screenshots/part-08-dashboard-after-oom.png)
+
+Пик памяти мог уложиться между опросами раз в 15 секунд. Поэтому отсутствие
+пика не опровергает OOM; подтверждение дают `OOMKilled` и рост рестартов.
+Отдельно ошибка `curl` или код 137 недостаточны для определения причины.
+
+Повторяющиеся легенды отражают историю разных Pod и container ID после
+рестартов, а не обязательно одновременно работающие экземпляры API.
+
+### Три выбранных сигнала для алертов
+
+| Сигнал | Начальное условие | Что обнаруживает | Чем грозит |
+| --- | --- | --- | --- |
+| Рестарт с последней причиной OOM | Рост счетчика рестартов за 5 минут, последняя причина `OOMKilled` | Уже произошедший отказ из-за памяти, даже если пик не попал в scrape | Обрыв запросов, потеря состояния в памяти, нестабильность при повторении |
+| Доля периодов с throttling | Выше 25% в течение 3 минут | Устойчивое ограничение CPU-квотой | Рост задержек, очередей и тайм-аутов; сам throttling процесс не убивает |
+| Память относительно лимита | Выше 85% в течение 2 минут | Малый запас до memory limit | Риск OOM-kill и рестартов при дальнейшем росте |
+
+Первое условие:
+
+```promql
+(
+  increase(kube_pod_container_status_restarts_total{
+    namespace="lab1", container="api"
+  }[5m]) > 0
+)
+and on (namespace, pod, container, uid)
+(
+  kube_pod_container_status_last_terminated_reason{
+    namespace="lab1", container="api", reason="OOMKilled"
+  } == 1
+)
+```
+
+`increase` отделяет новые рестарты от старого события, а UID не смешивает
+разные Pod. Последняя причина не позволяет посчитать все OOM за окно:
+это условие недавнего рестарта с последней причиной OOM.
+
+Третий сигнал использует отношение уже показанных gauge:
+
+```promql
+100 * container_memory_usage_bytes{namespace="lab1", container="api"}
+/
+container_spec_memory_limit_bytes{namespace="lab1", container="api"}
+> 85
+```
+
+85% лимита 64 МиБ - примерно 54.4 МиБ. Предупреждение дает запас, но не
+гарантирует обнаружение резкого скачка: OOM может произойти до выдержки
+двух минут. Поэтому предупреждение о памяти и сигнал произошедшего отказа
+дополняют друг друга.
+
+Окно `rate` усредняет скорость, выдержка условия требует устойчивого
+превышения на последовательных проверках. Пороги являются начальной
+настройкой стенда, а не универсальными production-нормами: высокая память
+не доказывает утечку, throttling сам по себе не доказывает недоступность API.
+
+Alertmanager установлен, но правила и внешние уведомления здесь не
+настраивал: часть 8 требует дашборд и обоснование трех сигналов.
+
+## Итог
+
+Сервис прошел все этапы: прямой запуск, namespaces, cgroups, ограничение прав,
+собственный launcher, Docker, multi-stage образ и gVisor.
+Мониторинг показал удержание памяти, ограничение CPU и восстановление после OOM.
+Код, конфиги, экспорт дашборда и исходные скриншоты сохранены в репозитории.

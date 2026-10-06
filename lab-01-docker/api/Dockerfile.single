@@ -1,0 +1,13 @@
+FROM golang:1.25-bookworm
+
+WORKDIR /src
+
+COPY go.mod ./
+RUN go mod download
+
+COPY main.go ./
+RUN go build -o /usr/local/bin/lab1-api .
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/lab1-api"]

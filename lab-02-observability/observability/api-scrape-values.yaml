@@ -1,0 +1,8 @@
+# Use the existing kube-prometheus-stack release "monitoring".
+# Its Prometheus CR selects ServiceMonitors with release=monitoring.
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: monitoring
+  interval: 15s
+  scrapeTimeout: 5s

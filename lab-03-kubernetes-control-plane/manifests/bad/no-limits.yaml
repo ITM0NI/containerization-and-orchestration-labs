@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-no-limits
+  labels:
+    app: shop
+spec:
+  containers:
+    - name: app
+      image: localhost:5000/shop-api:1.0.0
+      securityContext:
+        privileged: false

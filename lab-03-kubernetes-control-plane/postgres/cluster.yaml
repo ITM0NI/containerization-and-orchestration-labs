@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-1
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /var/local/postgres-1
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shop-db-user
+  namespace: shop
+type: kubernetes.io/basic-auth
+stringData:
+  username: shop
+  password: shop
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: shop
+spec:
+  instances: 1
+  imageName: localhost:5000/postgresql:17
+  imagePullPolicy: IfNotPresent
+  inheritedMetadata:
+    labels:
+      app: postgres
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  storage:
+    size: 1Gi
+    storageClass: manual
+  bootstrap:
+    initdb:
+      database: shop
+      owner: shop
+      secret:
+        name: shop-db-user
+  postgresql:
+    pg_hba:
+      - host all all all scram-sha-256

@@ -1,0 +1,35 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shop
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: shop.rules
+      rules:
+        - alert: ShopApiHighErrorRate
+          expr: |
+            sum(rate(shop_http_requests_total{namespace="shop",path=~"/order|/orders",code=~"5.."}[2m]))
+            /
+            sum(rate(shop_http_requests_total{namespace="shop",path=~"/order|/orders"}[2m]))
+            > 0.05
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Больше 5% ответов /order и /orders — это 5xx
+        - alert: ShopWorkerStalled
+          expr: sum(increase(shop_worker_polls_total{namespace="shop"}[2m])) == 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Worker две минуты не завершил ни одного опроса базы
+        - alert: ShopPostgresNotRunning
+          expr: kube_pod_status_phase{namespace="shop", pod="postgres-1", phase="Running"} == 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Под postgres-1 не в фазе Running

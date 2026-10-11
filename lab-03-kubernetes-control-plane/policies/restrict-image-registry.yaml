@@ -1,0 +1,28 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registry
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: localhost-registry-only
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cnpg-system
+                - monitoring
+      validate:
+        message: "Images must come from localhost:5000"
+        pattern:
+          spec:
+            containers:
+              - image: "localhost:5000/*"

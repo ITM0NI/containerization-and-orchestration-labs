@@ -1,0 +1,22 @@
+databaseURL: postgres://shop:shop@postgres-missing:5432/shop?sslmode=disable
+
+api:
+  replicas: 3
+  image:
+    repository: localhost:5000/shop-api
+    tag: "1.0.3"
+  healthFail: false
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+worker:
+  replicas: 2
+  image:
+    repository: localhost:5000/shop-worker
+    tag: "1.0.3"
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi

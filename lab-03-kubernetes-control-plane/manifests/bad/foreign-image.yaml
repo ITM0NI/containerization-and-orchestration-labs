@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-foreign-image
+  labels:
+    app: shop
+spec:
+  containers:
+    - name: app
+      image: nginx:latest
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        privileged: false

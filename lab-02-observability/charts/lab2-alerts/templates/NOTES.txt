@@ -1,0 +1,10 @@
+Check receiver rollout and received notifications:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/lab2-alert-receiver --timeout=120s
+  kubectl -n {{ .Release.Namespace }} logs deployment/lab2-alert-receiver -f
+
+Open each monitoring port-forward in a separate terminal:
+  kubectl -n monitoring port-forward service/monitoring-prometheus 19090:9090
+  kubectl -n monitoring port-forward service/monitoring-alertmanager 19093:9093
+
+Prometheus alerts: http://127.0.0.1:19090/alerts
+Alertmanager: http://127.0.0.1:19093

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-datasources
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    grafana_datasource: "1"
+data:
+  lab2-loki.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: {{ .Values.loki.name | quote }}
+        uid: {{ .Values.loki.uid | quote }}
+        type: loki
+        access: proxy
+        url: {{ .Values.loki.url | quote }}
+        isDefault: false
+        editable: false
+        jsonData:
+          maxLines: 1000

@@ -1,0 +1,7 @@
+Jaeger uses in-memory storage. Restarting or upgrading it clears stored traces.
+
+Open the UI in a separate terminal:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ .Release.Name }} 16686:16686
+
+OTLP/HTTP base endpoint for the API:
+  http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:4318

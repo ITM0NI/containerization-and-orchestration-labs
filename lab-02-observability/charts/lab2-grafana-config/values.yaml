@@ -1,0 +1,4 @@
+loki:
+  name: Loki
+  uid: lab2-loki
+  url: http://lab2-loki.monitoring.svc.cluster.local:3100

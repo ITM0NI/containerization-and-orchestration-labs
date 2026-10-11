@@ -1,0 +1,5 @@
+apiVersion: v2
+name: lab2-grafana-config
+description: Grafana datasource provisioning for the observability lab
+type: application
+version: 0.1.0

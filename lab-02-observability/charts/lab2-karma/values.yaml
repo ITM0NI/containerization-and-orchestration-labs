@@ -1,0 +1,17 @@
+image:
+  repository: ghcr.io/prymitive/karma
+  tag: "v0.133"
+  pullPolicy: IfNotPresent
+
+alertmanager:
+  name: lab2
+  uri: http://monitoring-alertmanager.monitoring.svc.cluster.local:9093
+refresh: 15s
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi

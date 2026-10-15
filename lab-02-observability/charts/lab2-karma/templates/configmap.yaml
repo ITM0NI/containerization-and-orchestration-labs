@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config.yaml: |
+    listen:
+      address: "0.0.0.0"
+      port: 8080
+    alertmanager:
+      interval: {{ .Values.refresh | quote }}
+      servers:
+        - name: {{ .Values.alertmanager.name | quote }}
+          uri: {{ .Values.alertmanager.uri | quote }}
+          timeout: 10s
+          proxy: true
+    ui:
+      refresh: {{ .Values.refresh | quote }}

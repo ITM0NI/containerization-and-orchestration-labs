@@ -1,0 +1,5 @@
+*_test.go
+*.test
+*.out
+coverage.*
+lab2-api

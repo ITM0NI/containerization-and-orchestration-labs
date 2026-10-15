@@ -1,0 +1,4 @@
+tracing:
+  serviceName: lab2-api
+  # OTLP/HTTP, not gRPC. The exporter adds /v1/traces to this base URL.
+  endpoint: http://lab2-jaeger.monitoring.svc.cluster.local:4318

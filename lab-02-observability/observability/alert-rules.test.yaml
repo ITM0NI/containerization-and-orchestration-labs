@@ -1,0 +1,160 @@
+rule_files:
+  - ../charts/lab2-alerts/files/alert-rules.yaml
+
+evaluation_interval: 15s
+
+tests:
+  - name: sustained user errors and latency
+    interval: 15s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="lab2",deployment="lab2-api"}'
+        values: '1x20'
+      - series: 'http_errors_total{namespace="lab2",service="lab2-api",route="/fail",method="GET"}'
+        values: '0+30x20'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/fail",method="GET",status="500"}'
+        values: '0+30x20'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_count{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="1"}'
+        values: '0x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="2.5"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="+Inf"}'
+        values: '0+30x20'
+    # rate() clamps extrapolation at counter zero in the partial 2m window.
+    # Error traffic first reaches 1 RPS at 30s; histogram count reaches it at 1m.
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="pending"}'
+        eval_time: 30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="pending",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname="Lab2HighLatency",alertstate="pending"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2HighLatency",alertstate="pending",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="firing"}'
+        eval_time: 2m15s
+        exp_samples: []
+      - expr: 'ALERTS{alertname="Lab2HighLatency",alertstate="firing"}'
+        eval_time: 2m45s
+        exp_samples: []
+      - expr: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="firing"}'
+        eval_time: 2m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="firing",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname="Lab2HighLatency",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2HighLatency",alertstate="firing",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+  - name: transient errors reset pending before two minutes
+    interval: 15s
+    input_series:
+      - series: 'http_errors_total{namespace="lab2",service="lab2-api",route="/fail",method="GET"}'
+        values: '0+30x3 90x17'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/fail",method="GET",status="500"}'
+        values: '0+30x3 90x17'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+30x3 90+300x17'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="pending"}'
+        eval_time: 30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="pending",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname="Lab2HighErrorRate",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples: []
+
+  - name: healthy traffic and target
+    interval: 15s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="lab2",deployment="lab2-api"}'
+        values: '1x20'
+      - series: 'http_errors_total{namespace="lab2",service="lab2-api",route="/slow",method="GET"}'
+        values: '0x20'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_count{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="1"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="2.5"}'
+        values: '0+30x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="+Inf"}'
+        values: '0+30x20'
+    promql_expr_test:
+      - expr: 'ALERTS{lab="lab2",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples: []
+
+  - name: low volume suppresses high ratio and latency
+    interval: 15s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="lab2",deployment="lab2-api"}'
+        values: '1x20'
+      - series: 'http_errors_total{namespace="lab2",service="lab2-api",route="/fail",method="GET"}'
+        values: '0+1x20'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/fail",method="GET",status="500"}'
+        values: '0+1x20'
+      - series: 'http_requests_total{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_count{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="1"}'
+        values: '0x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="2.5"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route="/slow",method="GET",status="200",le="+Inf"}'
+        values: '0+1x20'
+    promql_expr_test:
+      - expr: 'ALERTS{lab="lab2",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples: []
+
+  - name: zero available replicas then healthy then deployment series disappears
+    interval: 15s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="lab2",deployment="lab2-api"}'
+        values: '0x5 1x5 stale'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 45s
+        exp_samples: []
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 1m30s
+        exp_samples: []
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 3m45s
+        exp_samples: []
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+
+  - name: no deployment or HTTP series have ever existed
+    interval: 15s
+    input_series: []
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 45s
+        exp_samples: []
+      - expr: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="Lab2APIUnavailable",alertstate="firing",lab="lab2",namespace="lab2",service="lab2-api",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname=~"Lab2HighErrorRate|Lab2HighLatency",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples: []

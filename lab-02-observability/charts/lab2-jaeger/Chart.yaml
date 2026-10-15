@@ -1,0 +1,6 @@
+apiVersion: v2
+name: lab2-jaeger
+description: Single-process Jaeger v2 for the observability lab
+type: application
+version: 0.1.0
+appVersion: "2.22.0"

@@ -1,0 +1,25 @@
+# Overlay for the existing monitoring release (kube-prometheus-stack 91.8.2).
+# Use --reuse-values to preserve storage, resources and Grafana configuration.
+alertmanager:
+  config:
+    route:
+      routes:
+        - receiver: 'null'
+          matchers:
+            - 'alertname = "Watchdog"'
+        - receiver: lab2-webhook
+          matchers:
+            - 'namespace = "lab2"'
+            - 'lab = "lab2"'
+            - 'severity = "critical"'
+          group_by: [namespace, service, alertname]
+          group_wait: 10s
+          group_interval: 30s
+          repeat_interval: 5m
+    receivers:
+      - name: 'null'
+      - name: lab2-webhook
+        webhook_configs:
+          - url: http://lab2-alert-receiver.monitoring.svc.cluster.local:8080/alerts
+            send_resolved: true
+            max_alerts: 20

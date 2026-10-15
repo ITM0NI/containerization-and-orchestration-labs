@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config.yaml: |
+    extensions:
+      jaeger_storage:
+        backends:
+          lab_traces:
+            memory:
+              max_traces: {{ .Values.storage.maxTraces }}
+      jaeger_query:
+        storage:
+          traces: lab_traces
+        http:
+          endpoint: 0.0.0.0:16686
+        grpc:
+          endpoint: 127.0.0.1:16685
+      healthcheckv2:
+        use_v2: true
+        http:
+          endpoint: 0.0.0.0:13133
+          status:
+            enabled: true
+            path: /status
+
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        timeout: 1s
+
+    exporters:
+      jaeger_storage_exporter:
+        trace_storage: lab_traces
+
+    service:
+      extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [jaeger_storage_exporter]

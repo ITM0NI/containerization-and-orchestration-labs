@@ -1,0 +1,11 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lab2-alerts.labels" . | nindent 4 }}
+    release: monitoring
+    lab: lab2
+spec:
+  {{- .Files.Get "files/alert-rules.yaml" | nindent 2 }}

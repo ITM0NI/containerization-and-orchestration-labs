@@ -1,5 +1,5 @@
 apiVersion: v2
 name: lab2-grafana-config
-description: Grafana datasource provisioning for the observability lab
+description: Grafana datasource and RED dashboard provisioning for the observability lab
 type: application
-version: 0.1.0
+version: 0.2.0

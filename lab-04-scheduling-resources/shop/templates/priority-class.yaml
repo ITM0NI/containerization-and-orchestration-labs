@@ -1,0 +1,17 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priority.critical.name }}
+value: {{ .Values.priority.critical.value | int }}
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: Orders and postgres
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priority.background.name }}
+value: {{ .Values.priority.background.value | int }}
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: Night analytics

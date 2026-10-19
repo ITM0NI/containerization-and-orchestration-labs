@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-sla-dashboard
+  labels:
+    grafana_dashboard: "1"
+data:
+  shop-sla.json: |
+{{ .Files.Get "files/shop-sla.json" | indent 4 }}

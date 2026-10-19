@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch
+spec:
+  replicas: {{ .Values.batch.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: batch
+  template:
+    metadata:
+      labels:
+        app: batch
+    spec:
+      priorityClassName: {{ .Values.batch.priorityClassName }}
+      {{- if .Values.batch.nodeName }}
+      nodeName: {{ .Values.batch.nodeName }}
+      {{- end }}
+      {{- if .Values.batch.onlyNode }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - {{ .Values.batch.onlyNode }}
+      {{- end }}
+      containers:
+        - name: batch
+          image: "{{ .Values.batch.image.repository }}:{{ .Values.batch.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: MEMORY_MB
+              value: {{ .Values.batch.memoryMB | quote }}
+          securityContext:
+            privileged: false
+          resources:
+            requests:
+              cpu: {{ .Values.batch.resources.requests.cpu }}
+              memory: {{ .Values.batch.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.batch.resources.limits.cpu }}
+              memory: {{ .Values.batch.resources.limits.memory }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10

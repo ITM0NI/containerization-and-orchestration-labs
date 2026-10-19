@@ -1,0 +1,38 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shop
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: shop.rules
+      rules:
+        - alert: ShopOrderLatencyHigh
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (
+                rate(shop_http_request_duration_seconds_bucket{namespace="shop",path="/order"}[2m])
+              )
+            ) > 0.3
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: 95% POST /order медленнее 300 мс дольше двух минут
+        - alert: ShopBatchPending
+          expr: |
+            count(kube_pod_status_phase{namespace="shop",pod=~"batch-.+",phase="Pending"} == 1) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Под batch остаётся Pending
+        - alert: ShopBatchEvicted
+          expr: |
+            count(kube_pod_status_reason{namespace="shop",pod=~"batch-.+",reason="Evicted"} == 1) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kubelet выселил под batch

@@ -1,0 +1,73 @@
+databaseURL: postgres://shop:shop@postgres-rw:5432/shop?sslmode=disable
+
+api:
+  replicas: 3
+  image:
+    repository: localhost:5000/shop-api
+    tag: "1.0.3"
+  healthFail: false
+  priorityClassName: shop-critical
+  pdb:
+    minAvailable: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 100Mi
+
+worker:
+  replicas: 2
+  image:
+    repository: localhost:5000/shop-worker
+    tag: "1.0.3"
+  resources:
+    requests:
+      cpu: 10m
+      memory: 100Mi
+    limits:
+      cpu: 100m
+      memory: 100Mi
+
+spread:
+  mode: topologySpread
+  maxSkew: 1
+
+batch:
+  replicas: 1
+  priorityClassName: shop-background
+  memoryMB: 64
+  nodeName: lab4-worker
+  image:
+    repository: localhost:5000/shop-batch
+    tag: "1.0.1"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 100Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+postgres:
+  priorityClassName: shop-critical
+  enablePDB: false
+  nodeName: lab4-control-plane
+  pdb:
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+priority:
+  critical:
+    name: shop-critical
+    value: 1000000
+  background:
+    name: shop-background
+    value: -10

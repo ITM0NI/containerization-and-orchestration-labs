@@ -1,0 +1,79 @@
+groups:
+  - name: lab2-api-critical
+    interval: 15s
+    rules:
+      - alert: Lab2HighErrorRate
+        expr: |
+          (
+            sum by (namespace, service) (
+              rate(http_errors_total{namespace="lab2",service="lab2-api",route=~"/fail|/slow"}[2m])
+            )
+            /
+            sum by (namespace, service) (
+              rate(http_requests_total{namespace="lab2",service="lab2-api",route=~"/fail|/slow"}[2m])
+            )
+            > 0.20
+          )
+          and on (namespace, service)
+          (
+            sum by (namespace, service) (
+              rate(http_requests_total{namespace="lab2",service="lab2-api",route=~"/fail|/slow"}[2m])
+            ) >= 1
+          )
+        for: 2m
+        labels:
+          severity: critical
+          lab: lab2
+          namespace: lab2
+          service: lab2-api
+        annotations:
+          summary: "API: более 20% запросов завершаются 5xx"
+          description: "Доля 5xx за окно 2 минуты выше 20% непрерывно 2 минуты, при трафике не ниже 1 RPS. Проверяются /fail и /slow, без probes и генератора /load."
+          action: "Найти ошибки в Loki, перейти по trace_id в Jaeger, проверить зависимости и последнее изменение; при регрессии откатить релиз."
+      - alert: Lab2HighLatency
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (namespace, service, le) (
+                rate(http_request_duration_seconds_bucket{namespace="lab2",service="lab2-api",route=~"/fail|/slow"}[2m])
+              )
+            ) > 1
+          )
+          and on (namespace, service)
+          (
+            sum by (namespace, service) (
+              rate(http_request_duration_seconds_count{namespace="lab2",service="lab2-api",route=~"/fail|/slow"}[2m])
+            ) >= 1
+          )
+        for: 2m
+        labels:
+          severity: critical
+          lab: lab2
+          namespace: lab2
+          service: lab2-api
+        annotations:
+          summary: "API: p95 времени ответа выше 1 секунды"
+          description: "p95 за окно 2 минуты превышает 1 секунду непрерывно 2 минуты, при трафике /fail и /slow не ниже 1 RPS. Медленный хвост угрожает тайм-аутами у клиентов."
+          action: "Открыть медленные трейсы в Jaeger, найти длинные спаны, проверить зависимости, очереди и CPU; устранить причину, а не просто увеличить тайм-аут."
+      - alert: Lab2APIUnavailable
+        expr: |
+          (
+            max by (namespace) (
+              kube_deployment_status_replicas_available{namespace="lab2",deployment="lab2-api"}
+            ) == 0
+          )
+          or
+          sum by (namespace) (
+            absent(kube_deployment_status_replicas_available{namespace="lab2",deployment="lab2-api"})
+          )
+        for: 1m
+        labels:
+          severity: critical
+          lab: lab2
+          namespace: lab2
+          service: lab2-api
+        annotations:
+          summary: "API: нет доступных реплик или данных о Deployment"
+          description: "У Deployment lab2-api нет доступных реплик в течение минуты либо его метрика отсутствует. Нулевое число реплик означает отсутствие готовых Pod для обслуживания запросов; отсутствие данных требует проверки Deployment и kube-state-metrics."
+          action: "Проверить replicas, Pod, events, readiness и образ; восстановить реплики или исправить запуск. Если Deployment здоров, проверить kube-state-metrics и scrape."

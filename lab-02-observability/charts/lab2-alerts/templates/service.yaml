@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab2-alert-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lab2-alerts.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "lab2-alerts.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

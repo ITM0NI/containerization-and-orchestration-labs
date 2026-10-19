@@ -1,0 +1,6 @@
+Grafana sidecars discover the datasource and dashboard ConfigMaps in {{ .Release.Namespace }}.
+{{- if .Values.dashboards.enabled }}
+The exported RED dashboard keeps UID adm5g6w and its original three panels.
+Provisioning with this UID updates the existing dashboard, without creating a duplicate.
+The current dashboard provider is read-only in the UI; edit the exported JSON for future changes.
+{{- end }}

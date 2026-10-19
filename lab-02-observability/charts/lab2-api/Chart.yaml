@@ -1,0 +1,6 @@
+apiVersion: v2
+name: lab2-api
+description: HTTP API for the observability lab
+type: application
+version: 0.2.0
+appVersion: "dev"

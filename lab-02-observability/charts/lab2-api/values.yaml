@@ -1,0 +1,30 @@
+replicaCount: 1
+
+image:
+  repository: lab2-api
+  tag: "dev"
+  # The image is loaded into kind; it is not published in a registry.
+  pullPolicy: Never
+
+service:
+  port: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 32Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+tracing:
+  serviceName: lab2-api
+  # Keep export disabled until the Jaeger stage.
+  endpoint: ""
+
+serviceMonitor:
+  # Standalone API installation does not require Prometheus Operator.
+  enabled: false
+  additionalLabels: {}
+  interval: 15s
+  scrapeTimeout: 5s

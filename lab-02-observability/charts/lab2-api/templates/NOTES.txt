@@ -1,0 +1,19 @@
+Check rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ .Release.Name }} --timeout=120s
+
+Access the API in a separate terminal:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ .Release.Name }} 18080:{{ .Values.service.port }}
+
+Then:
+  curl --max-time 5 -i http://127.0.0.1:18080/health
+
+{{ if .Values.tracing.endpoint }}
+Trace export is configured; verify received traces in the backend.
+{{ else }}
+Trace export is disabled until a tracing endpoint is configured.
+{{ end }}
+{{ if .Values.serviceMonitor.enabled }}
+ServiceMonitor is enabled; verify the target in Prometheus.
+{{ else }}
+Prometheus scraping is not configured yet.
+{{ end }}

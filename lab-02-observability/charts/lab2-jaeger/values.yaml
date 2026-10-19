@@ -1,0 +1,16 @@
+image:
+  repository: cr.jaegertracing.io/jaegertracing/jaeger
+  tag: "2.22.0"
+  pullPolicy: IfNotPresent
+
+# Traces are deliberately transient: restarting Jaeger clears this storage.
+storage:
+  maxTraces: 5000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

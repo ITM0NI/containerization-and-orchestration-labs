@@ -1,0 +1,8 @@
+Open the Karma UI in a separate terminal:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ .Release.Name }} 18087:8080
+  http://127.0.0.1:18087
+
+Keep the API port-forward on 18080 running, then generate active alerts:
+  bash scripts/trigger-alerts.sh 240
+
+Karma fetches Alertmanager alerts every {{ .Values.refresh }}.

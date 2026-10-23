@@ -1,0 +1,42 @@
+api:
+  image: shop-api:lab6
+  v1:
+    replicas: 2
+    flaky: false
+  v2:
+    replicas: 1
+    fail: false
+  resources:
+    requests:
+      cpu: 200m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 100Mi
+mesh:
+  enabled: true
+  retries:
+    enabled: false
+  proxy:
+    cpuRequest: 20m
+    cpuLimit: 200m
+    memoryRequest: 32Mi
+    memoryLimit: 128Mi
+traffic:
+  v2Weight: 100
+postgres:
+  image: ghcr.io/cloudnative-pg/postgresql:17.4
+  database: shop
+  username: shop
+  storageSize: 1Gi
+  storageClass: standard
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+monitoring:
+  enabled: true
+  release: monitoring

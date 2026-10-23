@@ -1,0 +1,53 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shop-api
+  labels:
+    release: {{ .Values.monitoring.release }}
+spec:
+  selector:
+    matchLabels:
+      metrics: application
+  podTargetLabels: [version]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 5s
+{{- if .Values.mesh.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-proxy-metrics
+  labels:
+    metrics: linkerd
+spec:
+  selector:
+    app: api
+  ports:
+    - name: admin-http
+      port: 4191
+      targetPort: linkerd-admin
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shop-linkerd
+  labels:
+    release: {{ .Values.monitoring.release }}
+spec:
+  selector:
+    matchLabels:
+      metrics: linkerd
+  podTargetLabels: [version]
+  endpoints:
+    - port: admin-http
+      interval: 15s
+      scrapeTimeout: 5s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: app
+{{- end }}
+{{- end }}

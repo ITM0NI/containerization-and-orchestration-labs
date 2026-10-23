@@ -1,0 +1,11 @@
+# Open-source edge-25.5.5, Kubernetes 1.32; no viz Prometheus.
+controllerReplicas: 1
+heartbeatSchedule: "0 0 31 2 *"
+proxy:
+  resources:
+    cpu:
+      request: 20m
+      limit: 200m
+    memory:
+      request: 32Mi
+      limit: 128Mi

@@ -1,0 +1,44 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shop-network
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: shop.network
+      rules:
+        - alert: ShopCriticalPathPolicyDrop
+          expr: >-
+            sum(increase(hubble_drop_total{source_namespace="shop",source=~"shop/(api|worker)-.*",destination=~"shop/postgres-.*",reason="POLICY_DENIED"}[1m])) > 0
+          for: 30s
+          labels:
+            severity: critical
+            namespace: shop
+          annotations:
+            summary: "Политика блокирует API/worker → PostgreSQL"
+            description: "Проверить заблокированный поток в Hubble, метки подов и порт в политиках allow-database. Ожидаемые запреты для outsider не входят в это правило."
+        - alert: ShopDNSErrors
+          expr: >-
+            (sum(rate(hubble_dns_responses_total{destination_namespace="shop",rcode=~"Server Failure|Refused|Format Error|Not Implemented"}[2m])) / clamp_min(sum(rate(hubble_dns_responses_total{destination_namespace="shop"}[2m])), 0.000001) > 0.05)
+            or
+            (sum(increase(hubble_drop_total{source_namespace="shop",destination=~"kube-system/coredns-.*",reason="POLICY_DENIED"}[1m])) > 0)
+          for: 1m
+          labels:
+            severity: critical
+            namespace: shop
+          annotations:
+            summary: "Ошибки DNS или блокировка доступа shop к CoreDNS"
+            description: "Проверить политику DNS, запросы и ответы в Hubble, состояние CoreDNS. Обычный NXDOMAIN при переборе суффиксов поиска не считается аварией."
+        - alert: ShopHubbleMetricsUnavailable
+          expr: >-
+            (min(up{namespace="kube-system",service="hubble-metrics"}) == 0)
+            or sum(absent(up{namespace="kube-system",service="hubble-metrics"}))
+            or (count(up{namespace="kube-system",service="hubble-metrics"}) < count(kube_node_info))
+          for: 1m
+          labels:
+            severity: warning
+            namespace: shop
+          annotations:
+            summary: "Нет метрик Hubble хотя бы с одной ноды"
+            description: "Проверить Cilium, сбор метрик на порту 9965 и ServiceMonitor shop-hubble. Отсутствие адресов сбора также считается потерей наблюдаемости."

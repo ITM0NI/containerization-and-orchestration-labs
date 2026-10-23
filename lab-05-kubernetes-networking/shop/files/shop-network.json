@@ -1,0 +1,65 @@
+{
+  "uid": "shop-network",
+  "title": "Shop — сеть Kubernetes",
+  "tags": ["shop", "lab5", "hubble"],
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true,
+  "timezone": "utc",
+  "refresh": "5s",
+  "time": {"from": "now-30m", "to": "now"},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1, "title": "Сетевые события shop по результату обработки", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (verdict) (rate(hubble_flows_processed_total{source_namespace=\"shop\"}[1m]))", "legendFormat": "{{verdict}}"}],
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 2, "title": "Попытки установления TCP-соединений (SYN/с)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum(rate(hubble_tcp_flags_total{source_namespace=\"shop\",flag=\"SYN\"}[1m]))", "legendFormat": "TCP SYN"}],
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 3, "title": "Блокировки политиками: пакеты/с по парам компонентов", "type": "timeseries",
+      "gridPos": {"h": 16, "w": 24, "x": 0, "y": 16},
+      "description": "Реплики объединены по имени компонента; адресат без имени pod отмечен отдельно. Запреты outsider ожидаемы; API/worker → postgres означают поломку. Это пакеты, включая повторы TCP, не число запросов.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "suffix: пакетов/с", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (source_app,destination_app) (label_replace(label_replace(label_replace(rate(hubble_drop_total{source_namespace=\"shop\",reason=\"POLICY_DENIED\"}[1m]), \"destination_app\", \"без имени pod\", \"destination\", \".*\"), \"source_app\", \"$1\", \"source\", \"shop/([a-z]+)(-.*)?\"), \"destination_app\", \"$1\", \"destination\", \"[^/]+/([a-z]+)(-.*)?\"))", "legendFormat": "{{source_app}} → {{destination_app}}"}],
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["max"], "width": 430}}
+    },
+    {
+      "id": 4, "title": "DNS-запросы shop по типу, запросов/с", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "description": "Серии сложены: верхняя граница показывает общую частоту, толщина каждой полосы — частоту A или AAAA.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "suffix: запросов/с", "min": 0, "custom": {"stacking": {"mode": "normal", "group": "A"}, "fillOpacity": 25}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (qtypes) (rate(hubble_dns_queries_total{source_namespace=\"shop\"}[1m]))", "legendFormat": "{{qtypes}}"}],
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 5, "title": "DNS-ответы для shop по коду результата, ответов/с", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (rcode) (rate(hubble_dns_responses_total{destination_namespace=\"shop\"}[1m]))", "legendFormat": "{{rcode}}"}],
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 6, "title": "Сбор метрик Hubble: отдельная строка для каждого узла", "type": "state-timeline",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 32},
+      "description": "UP = успешный сбор, DOWN = ошибка. Пробел означает отсутствие данных, а не нулевое число ошибок.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "custom": {"fillOpacity": 80, "lineWidth": 0, "spanNulls": false}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "up{namespace=\"kube-system\",service=\"hubble-metrics\"}", "legendFormat": "{{node}}"}],
+      "options": {"mergeValues": true, "showValue": "always", "rowHeight": 0.7, "legend": {"showLegend": false}, "tooltip": {"mode": "single"}}
+    }
+  ]
+}

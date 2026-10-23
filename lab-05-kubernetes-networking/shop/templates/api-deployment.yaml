@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # На двухнодовом учебном kind-кластере API должен попадать и на control-plane.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      {{- if eq .Values.spread.mode "topologySpread" }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.spread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api
+      {{- else if eq .Values.spread.mode "podAntiAffinity" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: api
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              value: {{ .Values.databaseURL | quote }}
+            - name: HEALTH_FAIL
+              value: {{ .Values.api.healthFail | quote }}
+          lifecycle:
+            preStop:
+              # Дать EndpointSlice/kube-proxy убрать адрес до закрытия HTTP listener.
+              sleep:
+                seconds: 5
+          securityContext:
+            privileged: false
+          resources:
+            requests:
+              cpu: {{ .Values.api.resources.requests.cpu }}
+              memory: {{ .Values.api.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.api.resources.limits.cpu }}
+              memory: {{ .Values.api.resources.limits.memory }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3

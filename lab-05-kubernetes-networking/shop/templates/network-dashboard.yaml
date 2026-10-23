@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-network-dashboard
+  labels:
+    grafana_dashboard: "1"
+data:
+  shop-network.json: |-
+    {{- .Files.Get "files/shop-network.json" | nindent 4 }}

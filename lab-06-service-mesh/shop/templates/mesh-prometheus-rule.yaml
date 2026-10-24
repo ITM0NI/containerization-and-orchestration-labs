@@ -1,0 +1,48 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shop-mesh
+  labels:
+    release: {{ .Values.monitoring.release }}
+spec:
+  groups:
+    - name: shop.mesh
+      rules:
+        - alert: ShopCanaryHighErrorRate
+          expr: |
+            (
+              sum(rate(shop_http_requests_total{namespace="shop",service="api-v2",version="v2",path="/order",code=~"5.."}[1m]))
+              / sum(rate(shop_http_requests_total{namespace="shop",service="api-v2",version="v2",path="/order"}[1m])) > 0.05
+            ) and
+            (sum(increase(shop_http_requests_total{namespace="shop",service="api-v2",version="v2",path="/order"}[1m])) >= 50)
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Canary v2 returns more than 5% errors"
+        - alert: ShopCanaryHighLatency
+          expr: |
+            (
+              histogram_quantile(0.95, sum by(le)(rate(shop_http_request_duration_seconds_bucket{namespace="shop",service="api-v2",version="v2",path="/order"}[1m]))) > 0.6
+            ) and
+            (sum(increase(shop_http_requests_total{namespace="shop",service="api-v2",version="v2",path="/order"}[1m])) >= 50)
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Canary v2 p95 exceeds 600 ms"
+        - alert: ShopMeshMetricsUnavailable
+          expr: |
+            {{- if .Values.mesh.enabled }}
+            (sum(up{namespace="shop",service="api-proxy-metrics"}) or vector(0))
+              < sum(kube_deployment_spec_replicas{namespace="shop",deployment=~"api-v[12]"})
+            {{- else }}
+            vector(0) > 0
+            {{- end }}
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Mesh proxy metrics are missing or scrape failed"
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: shop
+description: Shop API canary with Linkerd and CloudNativePG
+version: 0.6.0
+appVersion: "1.0.0"
+type: application

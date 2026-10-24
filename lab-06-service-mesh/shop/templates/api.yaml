@@ -1,0 +1,111 @@
+{{- range $version := list "v1" "v2" }}
+{{- $config := index $.Values.api $version }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-{{ $version }}
+automountServiceAccountToken: {{ $.Values.mesh.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-{{ $version }}
+spec:
+  replicas: {{ $config.replicas }}
+  selector:
+    matchLabels:
+      app: api
+      version: {{ $version }}
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: api
+        version: {{ $version }}
+      annotations:
+        linkerd.io/inject: {{ ternary "enabled" "disabled" $.Values.mesh.enabled | quote }}
+        config.linkerd.io/proxy-cpu-request: {{ $.Values.mesh.proxy.cpuRequest | quote }}
+        config.linkerd.io/proxy-cpu-limit: {{ $.Values.mesh.proxy.cpuLimit | quote }}
+        config.linkerd.io/proxy-memory-request: {{ $.Values.mesh.proxy.memoryRequest | quote }}
+        config.linkerd.io/proxy-memory-limit: {{ $.Values.mesh.proxy.memoryLimit | quote }}
+        config.linkerd.io/skip-outbound-ports: "5432"
+    spec:
+      serviceAccountName: api-{{ $version }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: {{ $.Values.api.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: VERSION
+              value: {{ $version | quote }}
+            - name: FAIL
+              value: {{ default false $config.fail | quote }}
+            - name: FLAKY
+              value: {{ default false $config.flaky | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-app
+                  key: uri
+          resources:
+            {{- toYaml $.Values.api.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-{{ $version }}
+  labels:
+    app: api
+    metrics: application
+spec:
+  selector:
+    app: api
+    version: {{ $version }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

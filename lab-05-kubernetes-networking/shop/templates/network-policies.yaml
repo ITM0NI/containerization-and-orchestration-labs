@@ -1,0 +1,152 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $n := .Values.networkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-client-api
+spec:
+  podSelector:
+    matchLabels:
+      {{ $n.appLabel }}: {{ $n.clientLabel }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{ $n.appLabel }}: {{ $n.apiLabel }}
+      ports:
+        - protocol: TCP
+          port: {{ $n.httpPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      {{ $n.appLabel }}: {{ $n.apiLabel }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{ $n.appLabel }}: {{ $n.clientLabel }}
+        - ipBlock:
+            cidr: {{ $n.nodePortSourceCIDR }}
+      ports:
+        - protocol: TCP
+          port: {{ $n.httpPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-database-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: {{ $n.appLabel }}
+        operator: In
+        values:
+          {{- toYaml $n.database.sources | nindent 10 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{ $n.appLabel }}: {{ $n.database.destination }}
+      ports:
+        - protocol: TCP
+          port: {{ $n.database.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-database-ingress
+spec:
+  podSelector:
+    matchLabels:
+      {{ $n.appLabel }}: {{ $n.database.destination }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: {{ $n.appLabel }}
+                operator: In
+                values:
+                  {{- toYaml $n.database.sources | nindent 18 }}
+      ports:
+        - protocol: TCP
+          port: {{ $n.database.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus
+spec:
+  podSelector:
+    matchExpressions:
+      - key: {{ $n.appLabel }}
+        operator: In
+        values: [{{ $n.apiLabel | quote }}, {{ $n.workerLabel | quote }}]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $n.monitoring.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $n.monitoring.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $n.httpPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-operator
+spec:
+  podSelector:
+    matchLabels:
+      {{ $n.appLabel }}: {{ $n.postgresLabel }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $n.operator.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $n.operator.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $n.operator.statusPort }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-postgres-kubernetes-api
+spec:
+  endpointSelector:
+    matchLabels:
+      {{ $n.appLabel }}: {{ $n.postgresLabel }}
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: {{ $n.kubernetesAPI.servicePort | quote }}
+              protocol: TCP
+            - port: {{ $n.kubernetesAPI.endpointPort | quote }}
+              protocol: TCP
+{{- end }}

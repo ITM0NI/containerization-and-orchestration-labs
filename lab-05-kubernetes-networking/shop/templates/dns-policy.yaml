@@ -1,0 +1,24 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.dns.enabled }}
+{{- $d := .Values.networkPolicy.dns }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $d.namespace }}
+            {{- range $key, $value := $d.podLabels }}
+            {{ printf "k8s:%s" $key | quote }}: {{ $value | quote }}
+            {{- end }}
+      toPorts:
+        - ports:
+            - port: {{ $d.port | quote }}
+              protocol: ANY
+          # DNS proxy нужен для наблюдения запросов/ответов Hubble, не только UDP-пакетов.
+          rules:
+            dns:
+              - matchPattern: "*"
+{{- end }}

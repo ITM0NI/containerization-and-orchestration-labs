@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shop-hubble
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.networkMonitoring.namespace }}
+  selector:
+    matchLabels:
+      {{- toYaml .Values.networkMonitoring.serviceLabels | nindent 6 }}
+  endpoints:
+    - port: {{ .Values.networkMonitoring.port }}
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

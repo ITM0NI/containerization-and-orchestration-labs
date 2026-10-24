@@ -1,0 +1,26 @@
+kubeProxyReplacement: false
+rollOutCiliumPods: true
+# Учитывать адреса нод при сопоставлении CIDR-правил.
+policyCIDRMatchMode:
+  - nodes
+bpf:
+  datapathMode: veth
+ipam:
+  mode: kubernetes
+routingMode: tunnel
+tunnelProtocol: vxlan
+operator:
+  replicas: 1
+hubble:
+  enabled: true
+  metrics:
+    enableOpenMetrics: true
+    enabled:
+      - "flow:sourceContext=pod;destinationContext=pod;labelsContext=source_namespace,destination_namespace"
+      - "drop:sourceContext=pod;destinationContext=pod;labelsContext=source_namespace,destination_namespace"
+      - "tcp:sourceContext=pod;destinationContext=pod;labelsContext=source_namespace,destination_namespace"
+      - "dns:sourceContext=pod;destinationContext=pod;labelsContext=source_namespace,destination_namespace"
+  relay:
+    enabled: true
+  ui:
+    enabled: true

@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shop-db-user
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ .Values.postgres.username | quote }}
+  password: {{ .Values.postgres.password | quote }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+spec:
+  instances: 1
+  imageName: {{ .Values.postgres.image | quote }}
+  imagePullPolicy: IfNotPresent
+  enablePDB: false
+  inheritedMetadata:
+    labels:
+      app: postgres
+  resources:
+    {{- toYaml .Values.postgres.resources | nindent 4 }}
+  storage:
+    size: {{ .Values.postgres.storageSize }}
+    storageClass: {{ .Values.postgres.storageClass }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.postgres.database }}
+      owner: {{ .Values.postgres.username }}
+      secret:
+        name: shop-db-user
+  postgresql:
+    pg_hba:
+      - {{ printf "host %s %s all scram-sha-256" .Values.postgres.database .Values.postgres.username | quote }}

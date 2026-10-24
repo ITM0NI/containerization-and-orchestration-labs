@@ -1,0 +1,92 @@
+databaseURL: postgres://shop:shop@postgres-rw:5432/shop?sslmode=disable
+
+api:
+  service:
+    type: NodePort
+    nodePort: 30080
+    externalTrafficPolicy: Local
+  replicas: 3
+  image:
+    repository: shop-api
+    tag: lab5.1
+  healthFail: false
+  resources:
+    requests:
+      cpu: 200m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 100Mi
+
+worker:
+  replicas: 2
+  image:
+    repository: shop-worker
+    tag: lab5
+  resources:
+    requests:
+      cpu: 10m
+      memory: 100Mi
+    limits:
+      cpu: 100m
+      memory: 100Mi
+
+spread:
+  mode: topologySpread
+  maxSkew: 1
+
+postgres:
+  image: ghcr.io/cloudnative-pg/postgresql:17.6
+  database: shop
+  username: shop
+  # Только учебный пароль для изолированного локального стенда.
+  password: shop
+  storageClass: standard
+  storageSize: 1Gi
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+networkPolicy:
+  enabled: true
+  appLabel: app
+  apiLabel: api
+  workerLabel: worker
+  clientLabel: client
+  postgresLabel: postgres
+  httpPort: 8080
+  database:
+    sources: [api, worker]
+    destination: postgres
+    port: 5432
+  dns:
+    enabled: true
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns
+    port: 53
+  monitoring:
+    namespace: monitoring
+    podLabels:
+      prometheus: monitoring-prometheus
+  operator:
+    namespace: cnpg-system
+    podLabels:
+      app.kubernetes.io/name: cloudnative-pg
+      app.kubernetes.io/instance: cnpg
+    statusPort: 8000
+  kubernetesAPI:
+    servicePort: 443
+    endpointPort: 6443
+  # externalTrafficPolicy=Local сохраняет адрес Docker gateway; проверить после пересоздания.
+  nodePortSourceCIDR: 172.18.0.1/32
+
+networkMonitoring:
+  namespace: kube-system
+  serviceLabels:
+    k8s-app: hubble
+  port: hubble-metrics
